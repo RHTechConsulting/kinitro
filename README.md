@@ -3,7 +3,7 @@
 Kinitro drives the future of robotic policy and planning models with incentivized competitions.
 
 > [!NOTE]
-> We'll be onboarding miners very soon. Please take a look at this repository to get an idea of how things work, and to start creating your miners. We are not running any validator code right now, so miners will not be given tasks.
+> We'll be onboarding miners very soon. Please take a look at this repository and the [Kinitro agent template](https://github.com/threetau/kinitro-agent-template) to get an idea of how things work, and to start creating your miners. We are not running any validator code right now, so miners will not be given tasks.
 
 ## How it works
 
