@@ -11,6 +11,10 @@ Kinitro drives the future of robotic policy and planning models with incentivize
 2. **Compete**: Miners train and submit agents.
 3. **Validate & reward**: Validators verify; payouts are automatic.
 
+Below is an overview of the architecture:
+
+![Architectural overview](./architecture-overview.png)
+
 ## Incentive design
 
 - **Task bounties**: More performance = more rewards.
