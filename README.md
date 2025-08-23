@@ -21,6 +21,34 @@ Below is an overview of the architecture:
 - **Validator rewards**: Accurate, timely evaluations earn emissions.
 - **Continuous improvement**: Benchmarks evolve. Miners adapt. The frontier advances.
 
+## Installation
+
+Below are the basic installation steps for miners and validators. More detailed docs will come soon.
+
+1. **Clone the repository**:
+
+    ```bash
+    https://github.com/threetau/kinitro
+    cd kinitro
+    ```
+
+2. **Set up environment and dependencies**:
+
+    We need the following build dependencies:
+
+    ```bash
+    sudo apt install libpq-dev python3-dev
+    ```
+
+    Set up your Python environment:
+
+    ```bash
+    uv venv .venv
+    source .venv/bin/activate
+    uv sync --dev
+    uv pip install -e .
+    ```
+
 ## Contributing
 
 We welcome contributions to enhance Kinitro. Please fork the repository and submit a pull request with your improvements.
