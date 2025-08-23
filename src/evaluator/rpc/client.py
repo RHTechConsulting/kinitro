@@ -32,11 +32,12 @@ class AgentClient:
     async def connect(self):
         """Connect asynchronously using AsyncIoStream"""
         try:
+            print(f"[RPC Client] Connecting to agent at {self.address}:{self.port}")
             # Create the AsyncIoStream connection
             self.stream = await capnp.AsyncIoStream.create_connection(
                 host=self.address, port=self.port
             )
-
+            print(f"[RPC Client] Connected to agent at {self.address}:{self.port}")
             # Create TwoPartyClient with the stream
             self.client = capnp.TwoPartyClient(self.stream)
 

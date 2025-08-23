@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Any, Dict, List
 
+import capnp
 import ray
 from ray.actor import ActorProxy
 
@@ -18,8 +19,20 @@ class RolloutCluster:
         self.name = cluster_name  # Ray namespace
         self.workers: list[ActorProxy] = []
 
-    def create_worker(self, rollout_worker_id: SnowflakeId) -> ActorProxy:
-        worker = RolloutWorker.remote(self, rollout_worker_id)
+    def create_worker(
+        self,
+        rollout_worker_id: SnowflakeId,
+        benchmark_specs: list[BenchmarkSpec],
+        submission_container_host: str,
+        submission_container_port: int,
+    ) -> ActorProxy:
+        worker = RolloutWorker.remote(
+            self,
+            rollout_worker_id,
+            benchmark_specs,
+            submission_container_host,
+            submission_container_port,
+        )
         self.workers.append(worker)
         return worker
 
@@ -36,18 +49,20 @@ class RolloutWorker:
         cluster: RolloutCluster,
         rollout_worker_id: SnowflakeId,
         benchmark_specs: list[BenchmarkSpec],
+        submission_container_host: str,
+        submission_container_port: int,
     ) -> None:
         self.cluster = cluster
         self.rollout_worker_id = rollout_worker_id  # Name of the ray actor
-        self.submission_container_host = (
-            "localhost"  # Address of the submission container
-        )
+        self.submission_container_host = submission_container_host
+        self.submission_container_port = submission_container_port
         self.benchmark_specs = benchmark_specs
-        self.submission_container_port = 8000
         self.submission_container_address = None
         self.eval_start = None  # Start time of the evaluation
         self.eval_end = None  # End time of the evaluation
-
+        print(
+            f"[Worker] initializing agent client with {self.submission_container_host}:{self.submission_container_port}"
+        )
         self.agent = AgentClient(
             host=self.submission_container_host, port=self.submission_container_port
         )
@@ -75,12 +90,16 @@ class RolloutWorker:
         )
 
     async def connect_to_agent(self):
-        """Connect to the agent server."""
+        """Connect to the agent server, ensuring the KJ event loop is running."""
+
         if self.submission_container_address is None:
             raise ValueError("Submission container address not set")
 
         try:
-            await self.agent.connect()
+            # Ensure the KJ event loop is running for Cap'n Proto async RPC
+            print(f"Connecting to agent at {self.submission_container_address}")
+            async with capnp.kj_loop():
+                await self.agent.connect()
             logger.info(
                 f"Worker {self.rollout_worker_id} connected to agent at {self.submission_container_address}"
             )

@@ -1,5 +1,5 @@
 # Dockerfile for the submission containers
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Install system dependencies (if torch etc. need BLAS, gcc, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,5 +18,5 @@ RUN pip install --no-cache-dir \
 
 # Copy in the driver files
 WORKDIR /workspace
-COPY ./submission_template/ /templates/
-CMD ["python", "main.py"]
+COPY ../../../submission_template /templates/
+CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]
