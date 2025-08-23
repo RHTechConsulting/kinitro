@@ -24,7 +24,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: Run copy_submission_files.py
-        run: python copy_submission_files.py
+        run: |
+          mkdir -p submission_template
+          python copy_submission_files.py
 
   sync-agent-template:
     needs: copy-files
