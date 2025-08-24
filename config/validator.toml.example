@@ -5,7 +5,7 @@ wallet_path = "~/.bittensor/wallets"
 wallet_name = "default"
 hotkey_name = "default"
 
-db_file = "storb_data/database.db"
+pg_database = "postgresql://postgres@localhost/postgres"
 
 [subtensor]
 network = "finney"
