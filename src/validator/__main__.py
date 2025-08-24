@@ -150,6 +150,9 @@ class Validator(Neuron):
             self.db_manager.get_or_create_commitment_fingerprint(
                 validator_hotkey, miner_hotkey, fingerprint
             )
+            logger.debug(
+                f"Saved commitment fingerprint for {miner_hotkey}: {fingerprint}"
+            )
 
         except Exception as e:
             logger.error(
