@@ -63,7 +63,6 @@ def upgrade() -> None:
     op.create_table(
         "commitment_fingerprints",
         sa.Column("id", sa.BigInteger(), nullable=False),
-        sa.Column("validator_hotkey", sa.String(length=48), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
         sa.Column("fingerprint", sa.String(length=512), nullable=False),
         sa.Column(
@@ -80,29 +79,20 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
-            "validator_hotkey", "miner_hotkey", name="uq_validator_miner_fingerprint"
+            "miner_hotkey", name="commitment_fingerprints_miner_hotkey_key"
         ),
-    )
-    op.create_index(
-        "ix_commitment_fingerprints_validator",
-        "commitment_fingerprints",
-        ["validator_hotkey"],
-        unique=False,
     )
     op.create_index(
         "ix_commitment_fingerprints_miner",
         "commitment_fingerprints",
         ["miner_hotkey"],
-        unique=False,
+        unique=True,
     )
 
 
 def downgrade() -> None:
     op.drop_index(
         "ix_commitment_fingerprints_miner", table_name="commitment_fingerprints"
-    )
-    op.drop_index(
-        "ix_commitment_fingerprints_validator", table_name="commitment_fingerprints"
     )
     op.drop_table("commitment_fingerprints")
 

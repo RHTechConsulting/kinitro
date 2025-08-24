@@ -96,19 +96,18 @@ def test_commitment_fingerprint_persistence():
             print("✓ Database manager initialized successfully")
 
             # Test data
-            test_validator_hotkey = "test_validator_123"
             test_miner_hotkey = "test_miner_456"
             test_fingerprint = "v1|provider|repo_id_123"
 
             # Test creating commitment fingerprint
             fingerprint = db_manager.get_or_create_commitment_fingerprint(
-                test_validator_hotkey, test_miner_hotkey, test_fingerprint
+                test_miner_hotkey, test_fingerprint
             )
             print(f"✓ Created commitment fingerprint: {fingerprint.fingerprint}")
 
             # Test retrieving specific fingerprint
             retrieved_fingerprint = db_manager.get_commitment_fingerprint(
-                test_validator_hotkey, test_miner_hotkey
+                test_miner_hotkey
             )
             assert retrieved_fingerprint is not None, "Fingerprint should exist"
             assert retrieved_fingerprint.fingerprint == test_fingerprint
@@ -119,15 +118,13 @@ def test_commitment_fingerprint_persistence():
             # Test updating fingerprint
             updated_fingerprint = "v2|provider|repo_id_456"
             updated = db_manager.get_or_create_commitment_fingerprint(
-                test_validator_hotkey, test_miner_hotkey, updated_fingerprint
+                test_miner_hotkey, updated_fingerprint
             )
             print(f"✓ Updated commitment fingerprint: {updated.fingerprint}")
 
-            # Test retrieving all fingerprints for validator
-            all_fingerprints = db_manager.get_commitment_fingerprints_for_validator(
-                test_validator_hotkey
-            )
-            print(f"✓ Retrieved {len(all_fingerprints)} fingerprints for validator")
+            # Test retrieving all fingerprints
+            all_fingerprints = db_manager.get_all_commitment_fingerprints()
+            print(f"✓ Retrieved {len(all_fingerprints)} fingerprints")
 
             print("✓ Commitment fingerprint persistence test passed!")
             return True

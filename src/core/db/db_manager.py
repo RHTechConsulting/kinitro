@@ -460,16 +460,13 @@ class DatabaseManager:
             return ValidatorState.model_validate(pg_state)
 
     def get_or_create_commitment_fingerprint(
-        self, validator_hotkey: str, miner_hotkey: str, fingerprint: str
+        self, miner_hotkey: str, fingerprint: str
     ) -> CommitmentFingerprint:
-        """Get or create/update commitment fingerprint for a validator-miner pair."""
+        """Get or create/update commitment fingerprint for a miner."""
         with self.pg_session() as session:
             pg_fingerprint = (
                 session.query(PGCommitmentFingerprint)
-                .filter(
-                    PGCommitmentFingerprint.validator_hotkey == validator_hotkey,
-                    PGCommitmentFingerprint.miner_hotkey == miner_hotkey,
-                )
+                .filter(PGCommitmentFingerprint.miner_hotkey == miner_hotkey)
                 .first()
             )
 
@@ -478,7 +475,6 @@ class DatabaseManager:
                 fingerprint_id = next(self.snowflakeGen)
                 pg_fingerprint = PGCommitmentFingerprint(
                     id=fingerprint_id,
-                    validator_hotkey=validator_hotkey,
                     miner_hotkey=miner_hotkey,
                     fingerprint=fingerprint,
                 )
@@ -491,29 +487,20 @@ class DatabaseManager:
             session.refresh(pg_fingerprint)
             return CommitmentFingerprint.model_validate(pg_fingerprint)
 
-    def get_commitment_fingerprints_for_validator(
-        self, validator_hotkey: str
-    ) -> List[CommitmentFingerprint]:
-        """Get all commitment fingerprints for a validator."""
+    def get_all_commitment_fingerprints(self) -> List[CommitmentFingerprint]:
+        """Get all commitment fingerprints."""
         with self.pg_session() as session:
-            pg_fingerprints = (
-                session.query(PGCommitmentFingerprint)
-                .filter(PGCommitmentFingerprint.validator_hotkey == validator_hotkey)
-                .all()
-            )
+            pg_fingerprints = session.query(PGCommitmentFingerprint).all()
             return [CommitmentFingerprint.model_validate(fp) for fp in pg_fingerprints]
 
     def get_commitment_fingerprint(
-        self, validator_hotkey: str, miner_hotkey: str
+        self, miner_hotkey: str
     ) -> Optional[CommitmentFingerprint]:
-        """Get commitment fingerprint for a specific validator-miner pair."""
+        """Get commitment fingerprint for a specific miner."""
         with self.pg_session() as session:
             pg_fingerprint = (
                 session.query(PGCommitmentFingerprint)
-                .filter(
-                    PGCommitmentFingerprint.validator_hotkey == validator_hotkey,
-                    PGCommitmentFingerprint.miner_hotkey == miner_hotkey,
-                )
+                .filter(PGCommitmentFingerprint.miner_hotkey == miner_hotkey)
                 .first()
             )
 

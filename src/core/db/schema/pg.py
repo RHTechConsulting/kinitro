@@ -208,14 +208,7 @@ class CommitmentFingerprint(TimestampMixin, Base):
     __tablename__ = "commitment_fingerprints"
 
     id = Column(SnowflakeId, primary_key=True)
-    validator_hotkey = Column(SS58Address, nullable=False, index=True)
-    miner_hotkey = Column(SS58Address, nullable=False, index=True)
+    miner_hotkey = Column(SS58Address, nullable=False, unique=True, index=True)
     fingerprint = Column(String(512), nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint(
-            "validator_hotkey", "miner_hotkey", name="uq_validator_miner_fingerprint"
-        ),
-        Index("ix_commitment_fingerprints_validator", "validator_hotkey"),
-        Index("ix_commitment_fingerprints_miner", "miner_hotkey"),
-    )
+    __table_args__ = (Index("ix_commitment_fingerprints_miner", "miner_hotkey"),)

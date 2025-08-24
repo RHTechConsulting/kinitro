@@ -190,7 +190,6 @@ class ValidatorState(ValidatorStateBase, TimestampMixin):
 class CommitmentFingerprintBase(BaseModel):
     """Base model for commitment fingerprints."""
 
-    validator_hotkey: str = Field(..., max_length=48)
     miner_hotkey: str = Field(..., max_length=48)
     fingerprint: str = Field(..., max_length=512)
 
