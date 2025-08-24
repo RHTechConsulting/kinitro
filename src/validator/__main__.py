@@ -17,11 +17,11 @@ from core.neuron import Neuron
 from core.schemas import ChainCommitmentResponse
 
 from .config import ValidatorConfig
+from .parent_broadcaster import ParentValidatorBroadcaster
+from .child_receiver import ChildValidatorReceiver
 
 logger = get_logger(__name__)
 
-# TODO: make this a proper config option
-IS_CONTROL_VALIDATOR = True
 
 FALLBACK_MAX_COMMITMENT_LOOKBACK = 360
 
@@ -37,12 +37,24 @@ class Validator(Neuron):
         self._last_commitment_fingerprint_by_hotkey: dict[str, str] = {}
         self.last_seen_block: int = 0
 
+        # Parent-child validator components
+        self.is_parent = config.settings.get("is_parent", False)
+        self.parent_broadcaster = None
+        self.child_receiver = None
+
         # Initialize database manager if database URL is provided
         self.db_manager = None
         if self.config.settings.get("pg_database", None):
-            logger.info(f"Using Postgres DB at {self.config.settings['pg_database']}")
+            pg_url = self.config.settings["pg_database"]
+            duckdb_path = self.config.settings.get(
+                "duckdb_path", "evaluation_data.duckdb"
+            )
+
+            logger.info(f"Using Postgres DB at {pg_url}")
+            logger.info(f"Using DuckDB at {duckdb_path}")
+
             self.db_manager = DatabaseManager(
-                postgres_url=self.config.settings["pg_database"]
+                postgres_url=pg_url, duckdb_path=duckdb_path
             )
             self.db_manager.initialize_databases()
         else:
@@ -81,6 +93,9 @@ class Validator(Neuron):
                 self.last_seen_block, latest_block_number - self.max_commitment_lookback
             )
 
+        # Initialize parent-child components
+        self._init_parent_child_components()
+
     def _load_validator_state(self):
         """Load validator state from database on startup."""
         if not self.db_manager:
@@ -104,9 +119,7 @@ class Validator(Neuron):
             )
 
             # Load commitment fingerprints
-            fingerprints = self.db_manager.get_commitment_fingerprints_for_validator(
-                validator_hotkey
-            )
+            fingerprints = self.db_manager.get_all_commitment_fingerprints()
             self._last_commitment_fingerprint_by_hotkey = {
                 fp.miner_hotkey: fp.fingerprint for fp in fingerprints
             }
@@ -162,31 +175,91 @@ class Validator(Neuron):
                 f"Failed to save commitment fingerprint for {miner_hotkey}: {e}"
             )
 
+    def _init_parent_child_components(self):
+        """Initialize parent or child validator components based on configuration."""
+        if self.is_parent:
+            # Initialize parent broadcaster
+            broadcast_host = self.config.settings.get("broadcast_host", "localhost")
+            broadcast_port = self.config.settings.get("broadcast_port", 8765)
+            self.parent_broadcaster = ParentValidatorBroadcaster(
+                broadcast_host, broadcast_port
+            )
+            logger.info(
+                f"Initialized as parent validator (broadcasting on {broadcast_host}:{broadcast_port})"
+            )
+        else:
+            # Initialize child receiver
+            parent_host = self.config.settings.get("parent_host", "localhost")
+            parent_port = self.config.settings.get("parent_port", 8765)
+            validator_hotkey = self.keypair.ss58_address
+
+            self.child_receiver = ChildValidatorReceiver(
+                parent_host, parent_port, validator_hotkey, self._handle_received_job
+            )
+            logger.info(
+                f"Initialized as child validator (connecting to {parent_host}:{parent_port})"
+            )
+
+    async def _handle_received_job(self, commitment: ChainCommitmentResponse):
+        """Handle job received from parent validator."""
+        try:
+            # Convert commitment to evaluation job
+            job = self._create_evaluation_job_from_commitment(commitment)
+
+            # Queue job in child validator's PostgreSQL database using pgqueuer
+            await self._queue_job_with_pgqueuer(job)
+            logger.info(f"Queued job from parent: {job.hf_repo_id} (job_id: {job.id})")
+
+        except Exception as e:
+            logger.error(f"Failed to queue job from parent: {e}")
+            raise
+
     async def run(self):
         """
         Run the validator
         """
 
         try:
+            # Start parent-child components
+            if self.is_parent and self.parent_broadcaster:
+                await self.parent_broadcaster.start_server()
+            elif not self.is_parent and self.child_receiver:
+                await self.child_receiver.start()
+
+            # Start background tasks
             self.background_tasks()
+
+            # Keep the validator running indefinitely
+            logger.info("Validator is now running. Press Ctrl+C to stop.")
+            while True:
+                await asyncio.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("Received shutdown signal, stopping validator...")
         except Exception as e:
             logger.error(f"Error in validator run loop: {e}")
         finally:
+            # Stop parent-child components
+            if self.parent_broadcaster:
+                await self.parent_broadcaster.stop_server()
+            if self.child_receiver:
+                await self.child_receiver.stop()
+
             # Save state on shutdown
             if self.db_manager:
                 self._save_validator_state()
                 self.db_manager.close_connections()
 
     def background_tasks(self):
-        if IS_CONTROL_VALIDATOR:
+        if self.is_parent:
             self.sync_metagraph_thread = Thread(target=self.sync_metagraph, daemon=True)
             self.sync_metagraph_thread.start()
 
             self.job_queuer_thread = Thread(target=self.queue_jobs, daemon=True)
             self.job_queuer_thread.start()
         else:
-            # TODO: any tasks specific to non-control validators
-            ...
+            # Child validators receive jobs from parent, no need for chain querying
+            logger.info("Child validator: waiting for jobs from parent")
 
     def sync_metagraph(self):
         """
@@ -295,8 +368,8 @@ class Validator(Neuron):
         A validator that is not the control validator will not run this function.
         """
 
-        if not IS_CONTROL_VALIDATOR:
-            logger.warning("Not a control validator, skipping job queuing.")
+        if not self.is_parent:
+            logger.warning("Not a parent validator, skipping job queuing.")
             return
 
         while True:
@@ -304,34 +377,53 @@ class Validator(Neuron):
                 continue
 
             commitment = self.job_queue.get_nowait()
-            # TODO: process job for itself
 
-            # Process job for other validators
-            with self.validators_to_query_mutex:
-                for validator in self.validators_to_query:
-                    _ = validator
-                    # TODO: use RPC to send to other validators
+            # Convert commitment to evaluation job
+            try:
+                job = self._create_evaluation_job_from_commitment(commitment)
 
-    async def send_job(self):
-        """
-        Hand off the job to the orchestrator
-        """
+                # Queue job locally in parent validator's database
+                asyncio.run(self._queue_job_with_pgqueuer(job))
+                logger.info(f"Queued job locally: {job.hf_repo_id} (job_id: {job.id})")
+
+            except Exception as e:
+                logger.error(f"Failed to queue job locally: {e}")
+
+            # Broadcast job to child validators
+            if self.parent_broadcaster:
+                try:
+                    child_count = asyncio.run(
+                        self.parent_broadcaster.broadcast_job(commitment)
+                    )
+                    logger.info(f"Broadcasted job to {child_count} child validators")
+                except Exception as e:
+                    logger.error(f"Failed to broadcast job to children: {e}")
+            else:
+                logger.debug("No parent broadcaster available")
+
+    def _create_evaluation_job_from_commitment(
+        self, commitment: ChainCommitmentResponse
+    ) -> EvaluationJob:
+        """Convert a ChainCommitmentResponse to an EvaluationJob."""
         gen = SnowflakeGenerator(42)
         job_id = next(gen)
         sub_id = next(gen)
 
-        # TODO: don't hardcode this
+        # Extract data from commitment
+        data = commitment.data
+
         job = EvaluationJob(
             created_at=datetime.now(),
             updated_at=datetime.now(),
             status=EvaluationStatus.QUEUED,
-            submission_id=sub_id,  # type: ignore
-            miner_hotkey="5CyY97KCfwRC5UZN58A1cLpZnMgSZAKWtqaaggUfzYiJ6B8d",
-            hf_repo_id="rishiad/default_submission",
+            submission_id=sub_id,
+            miner_hotkey=commitment.hotkey,
+            hf_repo_id=data.repo_id,
+            # TODO: extract from commitment
             hf_repo_commit="93a2aa6de1069bcc37c60e80954d3a2c6e202678",
             env_provider="metaworld",
             env_name="MT10",
-            id=job_id,  # type: ignore
+            id=job_id,
             container_id=None,
             ray_worker_id=None,
             retry_count=0,
@@ -342,13 +434,33 @@ class Validator(Neuron):
             eval_end=None,
         )
 
-        conn = await asyncpg.connect()
-        driver = AsyncpgDriver(conn)
-        q = Queries(driver)
-        job_bytes = job.to_bytes()
-        await q.enqueue(["add_job"], [job_bytes], [0])
+        return job
 
-        # TODO
+    async def _queue_job_with_pgqueuer(self, job: EvaluationJob):
+        """Queue a job using pgqueuer into PostgreSQL."""
+        if not self.db_manager:
+            logger.error("No database manager available - cannot queue job")
+            return
+
+        try:
+            # Get PostgreSQL connection URL
+            pg_url = self.config.settings["pg_database"]
+
+            # Create connection and queue the job
+            conn = await asyncpg.connect(pg_url)
+            driver = AsyncpgDriver(conn)
+            q = Queries(driver)
+            job_bytes = job.to_bytes()
+            await q.enqueue(["add_job"], [job_bytes], [0])
+            await conn.close()
+
+            logger.info(
+                f"Queued job {job.id} for miner {job.miner_hotkey} (repo: {job.hf_repo_id})"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to queue job {job.id}: {e}")
+            raise
 
     def _compute_commitment_fingerprint(
         self, commitment_response: ChainCommitmentResponse
@@ -363,8 +475,6 @@ class Validator(Neuron):
 
 
 async def main():
-    import os
-
     config = ValidatorConfig()
 
     validator = Validator(config)
