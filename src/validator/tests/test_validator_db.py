@@ -33,9 +33,6 @@ def test_validator_state_persistence():
         try:
             # Initialize database manager
             db_manager = DatabaseManager(database_url)
-            # TODO: this only inits duckdb - so that means we have to run the migration for postgres manually with alembic
-            # for these tests. Should we instead create a script that automatically does this instead?
-            # db_manager.initialize_databases()
 
             print("✓ Database manager initialized successfully")
 
@@ -95,9 +92,6 @@ def test_commitment_fingerprint_persistence():
         try:
             # Initialize database manager
             db_manager = DatabaseManager(database_url)
-            # TODO: this only inits duckdb - so that means we have to run the migration for postgres manually with alembic
-            # for these tests. Should we instead create a script that automatically does this instead?
-            # db_manager.initialize_databases()
 
             print("✓ Database manager initialized successfully")
 
