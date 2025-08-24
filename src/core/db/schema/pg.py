@@ -189,3 +189,26 @@ class EvaluationResult(TimestampMixin, Base):
         Index("ix_eval_results_avg_reward", "avg_reward"),
         Index("ix_eval_results_computed_at", "computed_at"),
     )
+
+
+class ValidatorState(TimestampMixin, Base):
+    __tablename__ = "validator_state"
+
+    id = Column(SnowflakeId, primary_key=True)
+    validator_hotkey = Column(SS58Address, nullable=False, unique=True, index=True)
+    last_seen_block = Column(BigInteger, nullable=False, server_default="0")
+
+    __table_args__ = (
+        CheckConstraint("last_seen_block >= 0", name="ck_last_seen_block_non_negative"),
+        Index("ix_validator_state_hotkey_block", "validator_hotkey", "last_seen_block"),
+    )
+
+
+class CommitmentFingerprint(TimestampMixin, Base):
+    __tablename__ = "commitment_fingerprints"
+
+    id = Column(SnowflakeId, primary_key=True)
+    miner_hotkey = Column(SS58Address, nullable=False, unique=True, index=True)
+    fingerprint = Column(String(512), nullable=False)
+
+    __table_args__ = (Index("ix_commitment_fingerprints_miner", "miner_hotkey"),)

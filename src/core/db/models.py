@@ -169,3 +169,34 @@ class EpisodeStep(EpisodeStepBase):
     partition_date: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Validator State Models
+class ValidatorStateBase(BaseModel):
+    """Base model for validator state."""
+
+    validator_hotkey: str = Field(..., max_length=48)
+    last_seen_block: int = Field(default=0, ge=0)
+
+
+class ValidatorState(ValidatorStateBase, TimestampMixin):
+    """Full validator state model."""
+
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CommitmentFingerprintBase(BaseModel):
+    """Base model for commitment fingerprints."""
+
+    miner_hotkey: str = Field(..., max_length=48)
+    fingerprint: str = Field(..., max_length=512)
+
+
+class CommitmentFingerprint(CommitmentFingerprintBase, TimestampMixin):
+    """Full commitment fingerprint model."""
+
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)

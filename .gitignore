@@ -5,6 +5,9 @@ temp/
 /miner.toml
 /validator.toml
 
+# duckdb
+*.duckdb
+
 # models
 models/
 

@@ -10,6 +10,7 @@ from pgqueuer.queries import Queries
 from snowflake import SnowflakeGenerator
 
 from core.chain import query_commitments_from_substrate
+from core.db.db_manager import DatabaseManager
 from core.db.models import EvaluationJob, EvaluationStatus
 from core.log import get_logger
 from core.neuron import Neuron
@@ -35,6 +36,17 @@ class Validator(Neuron):
         self.miners_to_query: list[str] = []
         self._last_commitment_fingerprint_by_hotkey: dict[str, str] = {}
         self.last_seen_block: int = 0
+
+        # Initialize database manager if database URL is provided
+        self.db_manager = None
+        if self.config.settings.get("pg_database", None):
+            logger.info(f"Using Postgres DB at {self.config.settings['pg_database']}")
+            self.db_manager = DatabaseManager(
+                postgres_url=self.config.settings["pg_database"]
+            )
+            self.db_manager.initialize_databases()
+        else:
+            logger.warning("No Postgres DB configured, using in-memory database.")
         # Max lookback window (in blocks) to cap historical queries
         try:
             lookback_from_section = self.config.settings["neuron"].get(
@@ -58,12 +70,97 @@ class Validator(Neuron):
         if self.max_commitment_lookback < 1:
             self.max_commitment_lookback = 1
 
-        # Initialize last seen block bounded by the max lookback window
-        latest_block_number = self.substrate.get_block_number()
-        # Start at the edge of the lookback window so we don't scan unbounded history
-        self.last_seen_block: int = max(
-            self.last_seen_block, latest_block_number - self.max_commitment_lookback
-        )
+        # Load state from database if available, otherwise initialize
+        if self.db_manager:
+            self._load_validator_state()
+        else:
+            # Initialize last seen block bounded by the max lookback window
+            latest_block_number = self.substrate.get_block_number()
+            # Start at the edge of the lookback window so we don't scan unbounded history
+            self.last_seen_block: int = max(
+                self.last_seen_block, latest_block_number - self.max_commitment_lookback
+            )
+
+    def _load_validator_state(self):
+        """Load validator state from database on startup."""
+        if not self.db_manager:
+            return
+
+        try:
+            # Get validator hotkey (using a placeholder for now)
+            validator_hotkey = self.keypair.ss58_address
+
+            # Get or create validator state
+            validator_state = self.db_manager.get_or_create_validator_state(
+                validator_hotkey
+            )
+            self.last_seen_block = validator_state.last_seen_block
+
+            # Initialize last seen block bounded by the max lookback window
+            latest_block_number = self.substrate.get_block_number()
+            # Start at the edge of the lookback window so we don't scan unbounded history
+            self.last_seen_block = max(
+                self.last_seen_block, latest_block_number - self.max_commitment_lookback
+            )
+
+            # Load commitment fingerprints
+            fingerprints = self.db_manager.get_commitment_fingerprints_for_validator(
+                validator_hotkey
+            )
+            self._last_commitment_fingerprint_by_hotkey = {
+                fp.miner_hotkey: fp.fingerprint for fp in fingerprints
+            }
+
+            logger.info(
+                f"Loaded validator state: last_seen_block={self.last_seen_block}, "
+                f"fingerprints_count={len(self._last_commitment_fingerprint_by_hotkey)}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to load validator state: {e}")
+            # Fallback to default initialization
+            latest_block_number = self.substrate.get_block_number()
+            self.last_seen_block = max(
+                0, latest_block_number - self.max_commitment_lookback
+            )
+
+    def _save_validator_state(self):
+        """Save current validator state to database."""
+        if not self.db_manager:
+            return
+
+        try:
+            validator_hotkey = self.keypair.ss58_address
+
+            # Update last seen block
+            self.db_manager.update_validator_last_seen_block(
+                validator_hotkey, self.last_seen_block
+            )
+
+            logger.debug(
+                f"Saved validator state: last_seen_block={self.last_seen_block}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to save validator state: {e}")
+
+    def _save_commitment_fingerprint(self, miner_hotkey: str, fingerprint: str):
+        """Save commitment fingerprint to database."""
+        if not self.db_manager:
+            return
+
+        try:
+            self.db_manager.get_or_create_commitment_fingerprint(
+                miner_hotkey, fingerprint
+            )
+            logger.debug(
+                f"Saved commitment fingerprint for {miner_hotkey}: {fingerprint}"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to save commitment fingerprint for {miner_hotkey}: {e}"
+            )
 
     async def run(self):
         """
@@ -74,6 +171,11 @@ class Validator(Neuron):
             self.background_tasks()
         except Exception as e:
             logger.error(f"Error in validator run loop: {e}")
+        finally:
+            # Save state on shutdown
+            if self.db_manager:
+                self._save_validator_state()
+                self.db_manager.close_connections()
 
     def background_tasks(self):
         if IS_CONTROL_VALIDATOR:
@@ -154,9 +256,16 @@ class Validator(Neuron):
                                         f"Skipping unchanged commitment for miner {miner_hotkey} at block {block_num}"
                                     )
                                     continue
+                                # Update in-memory cache
                                 self._last_commitment_fingerprint_by_hotkey[
                                     miner_hotkey
                                 ] = fingerprint
+
+                                # Save to database if available
+                                self._save_commitment_fingerprint(
+                                    miner_hotkey, fingerprint
+                                )
+
                                 logger.debug(
                                     f"Block {block_num} - Miner {miner_hotkey} new/updated commitment: {commitment}"
                                 )
@@ -166,7 +275,10 @@ class Validator(Neuron):
                 logger.info(
                     f"Processed {total_commitments} new commitments from chain (skipped {total_skipped_unchanged} unchanged). Previous last seen block {self.last_seen_block}. Latest block is {latest_block}."
                 )
+
+                # Update last seen block and save to database
                 self.last_seen_block = latest_block
+                self._save_validator_state()
 
                 time.sleep(self.config.settings["neuron"]["sync_frequency"])
             except Exception as e:
@@ -251,7 +363,10 @@ class Validator(Neuron):
 
 
 async def main():
+    import os
+
     config = ValidatorConfig()
+
     validator = Validator(config)
     await validator.run()
 
