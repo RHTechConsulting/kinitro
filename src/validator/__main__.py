@@ -27,7 +27,7 @@ FALLBACK_MAX_COMMITMENT_LOOKBACK = 360
 
 
 class Validator(Neuron):
-    def __init__(self, config: ValidatorConfig, database_url: str = None):
+    def __init__(self, config: ValidatorConfig):
         super().__init__(config)
         self.config = config
         self.job_queue: Queue[ChainCommitmentResponse] = Queue()
@@ -39,9 +39,14 @@ class Validator(Neuron):
 
         # Initialize database manager if database URL is provided
         self.db_manager = None
-        if database_url:
-            self.db_manager = DatabaseManager(database_url)
+        if self.config.settings.get("pg_database", None):
+            logger.info(f"Using Postgres DB at {self.config.settings['pg_database']}")
+            self.db_manager = DatabaseManager(
+                postgres_url=self.config.settings["pg_database"]
+            )
             self.db_manager.initialize_databases()
+        else:
+            logger.warning("No Postgres DB configured, using in-memory database.")
         # Max lookback window (in blocks) to cap historical queries
         try:
             lookback_from_section = self.config.settings["neuron"].get(
@@ -83,7 +88,7 @@ class Validator(Neuron):
 
         try:
             # Get validator hotkey (using a placeholder for now)
-            validator_hotkey = getattr(self.config, "hotkey", "default_validator")
+            validator_hotkey = self.keypair.ss58_address
 
             # Get or create validator state
             validator_state = self.db_manager.get_or_create_validator_state(
@@ -125,7 +130,7 @@ class Validator(Neuron):
             return
 
         try:
-            validator_hotkey = getattr(self.config, "hotkey", "default_validator")
+            validator_hotkey = self.keypair.ss58_address
 
             # Update last seen block
             self.db_manager.update_validator_last_seen_block(
@@ -145,7 +150,7 @@ class Validator(Neuron):
             return
 
         try:
-            validator_hotkey = getattr(self.config, "hotkey", "default_validator")
+            validator_hotkey = self.keypair.ss58_address
 
             self.db_manager.get_or_create_commitment_fingerprint(
                 validator_hotkey, miner_hotkey, fingerprint
@@ -364,12 +369,7 @@ async def main():
 
     config = ValidatorConfig()
 
-    # Get database URL from environment or use default
-    database_url = os.getenv(
-        "DATABASE_URL", "postgresql://postgres@localhost:5432/postgres"
-    )
-
-    validator = Validator(config, database_url)
+    validator = Validator(config)
     await validator.run()
 
     logger.info(f"Validator running... timestamp: {time.time()}")
