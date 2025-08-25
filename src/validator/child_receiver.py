@@ -31,7 +31,7 @@ class ChildValidatorReceiver:
         parent_host: str,
         parent_port: int,
         validator_hotkey: str,
-        job_handler: Callable[[ChainCommitmentResponse], Awaitable[None]],
+        job_handler: Callable[[ChainCommitmentResponse], Awaitable[bool]],
     ):
         self.parent_host = parent_host
         self.parent_port = parent_port
@@ -189,14 +189,25 @@ class ChildValidatorReceiver:
             # Handle the job using the provided handler
             if self.job_handler:
                 try:
-                    await self.job_handler(job_msg.commitment)
-                    self.queue_size += 1  # Increment queue size
-                    logger.info(f"Job queued successfully: {job_msg.message_id}")
+                    success = await self.job_handler(job_msg.commitment)
 
-                    # Send status update that job was queued
-                    await self._send_status_update(
-                        job_msg.message_id, "queued", "Job added to local queue"
-                    )
+                    if success:
+                        self.queue_size += 1  # Increment queue size
+                        logger.info(f"Job queued successfully: {job_msg.message_id}")
+
+                        # Send status update that job was queued
+                        await self._send_status_update(
+                            job_msg.message_id, "queued", "Job added to local queue"
+                        )
+                    else:
+                        logger.warning(
+                            f"Job handler returned False for job {job_msg.message_id}"
+                        )
+                        await self._send_status_update(
+                            job_msg.message_id,
+                            "failed",
+                            "Job handler failed to queue job",
+                        )
 
                 except Exception as e:
                     logger.error(f"Error handling job {job_msg.message_id}: {e}")

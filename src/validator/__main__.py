@@ -200,19 +200,28 @@ class Validator(Neuron):
                 f"Initialized as child validator (connecting to {parent_host}:{parent_port})"
             )
 
-    async def _handle_received_job(self, commitment: ChainCommitmentResponse):
-        """Handle job received from parent validator."""
+    async def _handle_received_job(self, commitment: ChainCommitmentResponse) -> bool:
+        """Handle job received from parent validator.
+
+        Returns:
+            bool: True if job was successfully queued, False otherwise.
+        """
         try:
             # Convert commitment to evaluation job
             job = self._create_evaluation_job_from_commitment(commitment)
 
             # Queue job in child validator's PostgreSQL database using pgqueuer
             await self._queue_job_with_pgqueuer(job)
-            logger.info(f"Queued job from parent: {job.hf_repo_id} (job_id: {job.id})")
+            logger.info(
+                f"Queued job from parent: {job.hf_repo_id} (job_id: {job.id}, "
+                f"miner: {job.miner_hotkey}, env: {job.env_provider}/{job.env_name}, "
+                f"status: {str(job.status)}, submission_id: {job.submission_id})"
+            )
+            return True
 
         except Exception as e:
             logger.error(f"Failed to queue job from parent: {e}")
-            raise
+            return False
 
     async def run(self):
         """
