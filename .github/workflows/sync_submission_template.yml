@@ -7,8 +7,8 @@ on:
       - main
     paths:
       - 'submission_template/**'
-      - 'src/evaluator/rpc/server.py'
       - 'src/evaluator/agent_interface.py'
+      - 'src/evaluator/rpc/server.py'
       - 'src/evaluator/rpc/agent.capnp'
   workflow_dispatch:
 
@@ -26,20 +26,23 @@ jobs:
           persist-credentials: false
 
       - name: Checkout destination repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: threetau/kinitro-agent-template
-          token: ${{ secrets.MINER_TEMPLATE_PUSH_TOKEN }}
+          token: ${{ secrets.GH_ACTIONS_REPO_READ_WRITE }}
           ref: main
           path: ${{ env.TMPL_DIR }}
           fetch-depth: 1
 
+      # GitHub Actions is stupid so it does not support symlinks.
+      # Therefore, we need to copy the symlinked files manually.
       - name: Copy files
         shell: bash
         run: |
-          cp -f submission_template/agent_server.py "${{ env.TMPL_DIR }}/agent_server.py"
-          cp -f submission_template/agent_interface.py "${{ env.TMPL_DIR }}/agent_interface.py"
-          cp -f submission_template/agent.capnp "${{ env.TMPL_DIR }}/agent.capnp"
+          cp -f submission_template/main.py "${{ env.TMPL_DIR }}/main.py"
+          cp -f src/evaluator/agent_interface.py "${{ env.TMPL_DIR }}/agent_interface.py"
+          cp -f src/evaluator/rpc/server.py "${{ env.TMPL_DIR }}/agent_server.py"
+          cp -f src/evaluator/rpc/agent.capnp "${{ env.TMPL_DIR }}/agent.capnp"
       
       - name: Commit and push changes
         shell: bash
