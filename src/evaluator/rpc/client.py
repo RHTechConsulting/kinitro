@@ -29,24 +29,33 @@ class AgentClient:
         self.agent = None
         self.stream = None
 
-    async def connect(self):
+    async def connect(self, timeout=30.0):
         """Connect asynchronously using AsyncIoStream"""
         try:
             print(f"[RPC Client] Connecting to agent at {self.address}:{self.port}")
-            # Create the AsyncIoStream connection
-            self.stream = await capnp.AsyncIoStream.create_connection(
-                host=self.address, port=self.port
+            # Create the AsyncIoStream connection with timeout
+            self.stream = await asyncio.wait_for(
+                capnp.AsyncIoStream.create_connection(
+                    host=self.address, port=self.port
+                ),
+                timeout=timeout
             )
             print(f"[RPC Client] Connected to agent at {self.address}:{self.port}")
             # Create TwoPartyClient with the stream
             self.client = capnp.TwoPartyClient(self.stream)
+            print(
+                f"[RPC Client] TwoPartyClient established to {self.address}:{self.port}"
+            )
 
             # Get the bootstrap capability
             self.agent = self.client.bootstrap().cast_as(agent_capnp.Agent)
 
             logger.info(f"Connected to {self.address}:{self.port}")
+        except asyncio.TimeoutError:
+            logger.error(f"Connection timeout after {timeout}s to {self.address}:{self.port}")
+            raise
         except Exception as e:
-            logger.error(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to {self.address}:{self.port}: {e}")
             raise
 
     async def act(self, obs) -> torch.Tensor:

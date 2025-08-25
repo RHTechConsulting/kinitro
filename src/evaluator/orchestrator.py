@@ -95,11 +95,27 @@ class Orchestrator:
             # Set config for the worker (connect to agent on port 8000)
             ray.get(worker.set_config.remote(submission_address))
 
-            # Optionally, connect the worker to the agent (async)
+            # Connect the worker to the agent with retry logic
             # This requires the worker's connect_to_agent method to be async, so we use ray's async API
             # Note: Ray remote async methods return an ObjectRef (future)
-            connect_future = worker.connect_to_agent.remote()
-            ray.get(connect_future)
+            max_retries = 5
+            retry_delay = 5  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    print(f"Attempting to connect to agent (attempt {attempt + 1}/{max_retries})...")
+                    connect_future = worker.connect_to_agent.remote()
+                    ray.get(connect_future, timeout=30)  # 30 second timeout
+                    print(f"Successfully connected to agent on attempt {attempt + 1}")
+                    break
+                except Exception as e:
+                    print(f"Connection attempt {attempt + 1} failed: {e}")
+                    if attempt < max_retries - 1:
+                        print(f"Retrying in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        print(f"Failed to connect after {max_retries} attempts")
+                        raise
 
             print(f"Ray worker created and connected to agent at {submission_address}")
             print(f"Processed: {evaluationJob!r}")

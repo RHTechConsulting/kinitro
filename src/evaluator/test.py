@@ -19,7 +19,7 @@ async def main():
         submission_id=sub_id,  # type: ignore
         miner_hotkey="5CyY97KCfwRC5UZN58A1cLpZnMgSZAKWtqaaggUfzYiJ6B8d",
         hf_repo_id="rishiad/default_submission",
-        hf_repo_commit="6409a26d2670968b3b1f14201cd707d3323b4da4",
+        hf_repo_commit="6c27519d0faf8bce22764e70776cdd819a07de0c",
         env_provider="metaworld",
         env_name="MT10",
         id=job_id,  # type: ignore
