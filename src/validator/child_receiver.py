@@ -42,7 +42,6 @@ class ChildValidatorReceiver:
         self._reconnect_task = None
         self._heartbeat_task = None
         self.queue_size = 0
-        self.capabilities = {"version": "1.0", "supported_envs": "metaworld"}
 
     async def start(self):
         """Start the child validator receiver and connect to parent."""
@@ -133,7 +132,6 @@ class ChildValidatorReceiver:
             sender_id=self.validator_hotkey,
             message_id=str(uuid.uuid4()),
             validator_hotkey=self.validator_hotkey,
-            capabilities=self.capabilities,
         )
 
         await self._send_message(register_msg)

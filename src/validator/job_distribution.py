@@ -59,7 +59,6 @@ class ChildRegisterMessage(ValidatorMessage):
 
     message_type: MessageType = MessageType.CHILD_REGISTER
     validator_hotkey: str
-    capabilities: dict[str, str] = Field(default_factory=dict)
 
 
 class ChildDisconnectMessage(ValidatorMessage):
@@ -78,4 +77,3 @@ class ValidatorConnectionInfo(BaseModel):
     last_heartbeat: datetime
     status: str = "active"
     queue_size: int = 0
-    capabilities: dict[str, str] = Field(default_factory=dict)

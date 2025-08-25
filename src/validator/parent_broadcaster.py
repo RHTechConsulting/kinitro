@@ -127,7 +127,6 @@ class ParentValidatorBroadcaster:
                 hotkey=register_msg.validator_hotkey,
                 connected_at=datetime.now(timezone.utc),
                 last_heartbeat=datetime.now(timezone.utc),
-                capabilities=register_msg.capabilities,
             )
 
             self.connected_children[client_id] = connection_info
