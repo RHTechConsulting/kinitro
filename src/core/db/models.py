@@ -34,7 +34,6 @@ class SubmissionMixin(BaseModel):
     submission_id: int
     miner_hotkey: str = Field(..., max_length=48)
     hf_repo_id: str = Field(..., max_length=256)
-    hf_repo_commit: Optional[str] = Field(None, max_length=40)
     env_provider: str = Field(..., max_length=64)
     env_name: str = Field(..., max_length=128)
 
