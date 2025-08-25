@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 
 
 FALLBACK_MAX_COMMITMENT_LOOKBACK = 360
+JOB_QUEUE_POLL_INTERVAL = 0.1  # Sleep duration when job queue is empty
 
 
 class Validator(Neuron):
@@ -41,6 +42,11 @@ class Validator(Neuron):
         self.is_parent = config.settings.get("is_parent", False)
         self.parent_broadcaster = None
         self.child_receiver = None
+
+        # Shutdown control
+        self._shutdown_requested = False
+        self.sync_metagraph_thread = None
+        self.job_queuer_thread = None
 
         # Initialize database manager if database URL is provided
         self.db_manager = None
@@ -200,6 +206,28 @@ class Validator(Neuron):
                 f"Initialized as child validator (connecting to {parent_host}:{parent_port})"
             )
 
+    async def graceful_shutdown(self):
+        """Gracefully shutdown the validator by waiting for background threads to complete."""
+        logger.info("Initiating graceful shutdown...")
+
+        # Set shutdown flag to signal threads to stop
+        self._shutdown_requested = True
+
+        # Wait for background threads to complete
+        if self.sync_metagraph_thread and self.sync_metagraph_thread.is_alive():
+            logger.info("Waiting for metagraph sync to complete...")
+            self.sync_metagraph_thread.join(timeout=10)  # Wait max 10 seconds
+            if self.sync_metagraph_thread.is_alive():
+                logger.warning("Metagraph sync thread did not stop within timeout")
+
+        if self.job_queuer_thread and self.job_queuer_thread.is_alive():
+            logger.info("Waiting for job queue processing to complete...")
+            self.job_queuer_thread.join(timeout=10)  # Wait max 10 seconds
+            if self.job_queuer_thread.is_alive():
+                logger.warning("Job queuer thread did not stop within timeout")
+
+        logger.info("Background threads stopped")
+
     async def _handle_received_job(self, commitment: ChainCommitmentResponse) -> bool:
         """Handle job received from parent validator.
 
@@ -240,14 +268,19 @@ class Validator(Neuron):
 
             # Keep the validator running indefinitely
             logger.info("Validator is now running. Press Ctrl+C to stop.")
-            while True:
+            while not self._shutdown_requested:
                 await asyncio.sleep(1)
+            logger.info("Shutdown requested, exiting run loop...")
 
         except KeyboardInterrupt:
             logger.info("Received shutdown signal, stopping validator...")
+            self._shutdown_requested = True
         except Exception as e:
             logger.error(f"Error in validator run loop: {e}")
         finally:
+            # Gracefully shutdown background threads
+            await self.graceful_shutdown()
+
             # Stop parent-child components
             if self.parent_broadcaster:
                 await self.parent_broadcaster.stop_server()
@@ -261,10 +294,12 @@ class Validator(Neuron):
 
     def background_tasks(self):
         if self.is_parent:
-            self.sync_metagraph_thread = Thread(target=self.sync_metagraph, daemon=True)
+            self.sync_metagraph_thread = Thread(
+                target=self.sync_metagraph, daemon=False
+            )
             self.sync_metagraph_thread.start()
 
-            self.job_queuer_thread = Thread(target=self.queue_jobs, daemon=True)
+            self.job_queuer_thread = Thread(target=self.queue_jobs, daemon=False)
             self.job_queuer_thread.start()
         else:
             # Child validators receive jobs from parent, no need for chain querying
@@ -274,7 +309,7 @@ class Validator(Neuron):
         """
         Sync nodes with the metagraph and query miner commitments from the chain.
         """
-        while True:
+        while not self._shutdown_requested:
             try:
                 # Sync the metagraph to get the latest nodes
                 self.metagraph.sync_nodes()
@@ -362,10 +397,22 @@ class Validator(Neuron):
                 self.last_seen_block = latest_block
                 self._save_validator_state()
 
-                time.sleep(self.config.settings["neuron"]["sync_frequency"])
+                # Interruptible sleep
+                sync_freq = self.config.settings["neuron"]["sync_frequency"]
+                for _ in range(sync_freq):
+                    if self._shutdown_requested:
+                        break
+                    time.sleep(1)
             except Exception as e:
                 logger.error(f"Error syncing metagraph: {e}")
-                time.sleep(self.config.settings["neuron"]["sync_frequency"] // 2)
+                # Interruptible error sleep
+                error_sleep = self.config.settings["neuron"]["sync_frequency"] // 2
+                for _ in range(error_sleep):
+                    if self._shutdown_requested:
+                        break
+                    time.sleep(1)
+
+        logger.info("Metagraph sync thread exiting cleanly")
 
     def queue_jobs(self):
         """
@@ -381,8 +428,10 @@ class Validator(Neuron):
             logger.warning("Not a parent validator, skipping job queuing.")
             return
 
-        while True:
+        while not self._shutdown_requested:
             if self.job_queue.empty():
+                # Small sleep to avoid busy waiting
+                time.sleep(JOB_QUEUE_POLL_INTERVAL)
                 continue
 
             commitment = self.job_queue.get_nowait()
@@ -409,6 +458,8 @@ class Validator(Neuron):
                     logger.error(f"Failed to broadcast job to children: {e}")
             else:
                 logger.debug("No parent broadcaster available")
+
+        logger.info("Job queuer thread exiting cleanly")
 
     def _create_evaluation_job_from_commitment(
         self, commitment: ChainCommitmentResponse
@@ -485,17 +536,20 @@ async def main():
     config = ValidatorConfig()
 
     validator = Validator(config)
-    await validator.run()
-
-    logger.info(f"Validator running... timestamp: {time.time()}")
 
     try:
-        while True:
-            await asyncio.sleep(1)
+        await validator.run()
     except KeyboardInterrupt:
-        logger.info("Stopping validator...")
-        # await validator.stop()
+        logger.info("Validator shutdown complete")
+    except Exception as e:
+        logger.error(f"Validator error: {e}")
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nValidator stopped by user")
+        print("Hit Ctrl+C again to shut down")
+        exit(0)
