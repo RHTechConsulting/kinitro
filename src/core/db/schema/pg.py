@@ -55,7 +55,6 @@ class SubmissionMixin:
     submission_id = Column(SnowflakeId, nullable=False, index=True)
     miner_hotkey = Column(SS58Address, nullable=False, index=True)
     hf_repo_id = Column(String(256), nullable=False, index=True)
-    hf_repo_commit = Column(String(40), nullable=True, index=True)  # Git SHA
     env_provider = Column(String(64), nullable=False)
     env_name = Column(String(128), nullable=False, index=True)
 

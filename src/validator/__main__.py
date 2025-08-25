@@ -428,8 +428,6 @@ class Validator(Neuron):
             submission_id=sub_id,
             miner_hotkey=commitment.hotkey,
             hf_repo_id=data.repo_id,
-            # TODO: extract from commitment
-            hf_repo_commit="93a2aa6de1069bcc37c60e80954d3a2c6e202678",
             env_provider="metaworld",
             env_name="MT10",
             id=job_id,

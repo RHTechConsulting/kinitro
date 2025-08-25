@@ -51,7 +51,6 @@ def upgrade() -> None:
         sa.Column("submission_id", sa.BigInteger(), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
         sa.Column("hf_repo_id", sa.String(length=256), nullable=False),
-        sa.Column("hf_repo_commit", sa.String(length=40), nullable=True),
         sa.Column("env_provider", sa.String(length=64), nullable=False),
         sa.Column("env_name", sa.String(length=128), nullable=False),
         sa.Column(
@@ -139,12 +138,6 @@ def upgrade() -> None:
         op.f("ix_evaluation_jobs_eval_start"),
         "evaluation_jobs",
         ["eval_start"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_evaluation_jobs_hf_repo_commit"),
-        "evaluation_jobs",
-        ["hf_repo_commit"],
         unique=False,
     )
     op.create_index(
@@ -288,9 +281,6 @@ def downgrade() -> None:
     )
     op.drop_index(op.f("ix_evaluation_jobs_miner_hotkey"), table_name="evaluation_jobs")
     op.drop_index(op.f("ix_evaluation_jobs_hf_repo_id"), table_name="evaluation_jobs")
-    op.drop_index(
-        op.f("ix_evaluation_jobs_hf_repo_commit"), table_name="evaluation_jobs"
-    )
     op.drop_index(op.f("ix_evaluation_jobs_eval_start"), table_name="evaluation_jobs")
     op.drop_index(op.f("ix_evaluation_jobs_eval_end"), table_name="evaluation_jobs")
     op.drop_index(op.f("ix_evaluation_jobs_env_name"), table_name="evaluation_jobs")
