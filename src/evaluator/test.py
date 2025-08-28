@@ -33,7 +33,9 @@ async def main():
         eval_end=None,
     )
 
-    conn = await asyncpg.connect()
+    conn = await asyncpg.connect(
+        dsn="postgresql://myuser:mypassword@localhost:5432/kinitrodb"
+            )
     driver = AsyncpgDriver(conn)
     q = Queries(driver)
     job_bytes = job.to_bytes()

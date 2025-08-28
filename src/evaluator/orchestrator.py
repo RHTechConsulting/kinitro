@@ -36,9 +36,7 @@ class Orchestrator:
             pod = containers.create_container(repo, evaluationJob.submission_id)
             print(f"Created pod: {pod}")
 
-            # --- NodePort/NodeIP logic ---
-            # Get the NodePort and Node IP for the service
-
+            # Get NodePort and Node IP for direct TCP connection
             config.load_kube_config()
             k8v1api = client.CoreV1Api()
             v1 = client.CoreV1Api()
@@ -78,21 +76,24 @@ class Orchestrator:
                 ray.init(ignore_reinit_error=True)
 
             # Create a benchmark spec for the job (example: MT1, can be customized)
+            # Temporarily disable image observations to isolate RPC size issue
             benchmark_spec = BenchmarkSpec(
                 provider=evaluationJob.env_provider,
                 benchmark_name=evaluationJob.env_name,
                 config={"env_name": evaluationJob.env_name}
                 if hasattr(evaluationJob, "env_name")
                 else {},
+                enable_image_obs=False,  # Disable image observations for now
+                render_mode=None,  # No rendering
             )
 
             # Create a Ray cluster and worker
             cluster = RolloutCluster("eval-cluster")
             # Use the job id as the worker id (SnowflakeId is int)
             worker = cluster.create_worker(
-                evaluationJob.id, [benchmark_spec], node_ip, node_port
+                evaluationJob.id, [benchmark_spec], node_ip, node_port, evaluationJob.submission_id
             )
-            # Set config for the worker (connect to agent on port 8000)
+            # Set config for the worker (connect to agent directly)
             ray.get(worker.set_config.remote(submission_address))
 
             # Connect the worker to the agent with retry logic
@@ -118,11 +119,39 @@ class Orchestrator:
                         raise
 
             print(f"Ray worker created and connected to agent at {submission_address}")
+            
+            # Start the actual evaluation
+            print("Starting evaluation...")
+            try:
+                # Run all benchmark tasks
+                evaluation_future = worker.run_all_benchmark_tasks.remote()
+                results = ray.get(evaluation_future, timeout=3600)  # 1 hour timeout for evaluation
+                
+                print(f"Evaluation completed successfully with {len(results)} results")
+                print(f"Summary: {len(results)} tasks completed")
+                
+                # Log success metrics
+                if results:
+                    total_episodes = sum(len(result.episodes) for result in results)
+                    avg_success_rate = sum(result.success_rate for result in results) / len(results)
+                    avg_reward = sum(result.mean_reward for result in results) / len(results)
+                    
+                    print(f"Total episodes: {total_episodes}")
+                    print(f"Average success rate: {avg_success_rate:.3f}")
+                    print(f"Average reward: {avg_reward:.3f}")
+                
+            except Exception as e:
+                print(f"Evaluation failed: {e}")
+                logger.error(f"Evaluation failed for job {evaluationJob.id}: {e}")
+                raise
+            
             print(f"Processed: {evaluationJob!r}")
 
     async def start(self):
         logger.info("Starting orchestrator...")
-        conn = await asyncpg.connect()
+        conn = await asyncpg.connect(
+                dsn="postgresql://myuser:mypassword@localhost:5432/kinitrodb"
+                )
 
         driver = AsyncpgDriver(conn)
         pgq = PgQueuer(driver)
@@ -133,7 +162,7 @@ class Orchestrator:
             print(f"Job {job.id} added to processing queue.")
 
         await pgq.run()
-        return pgq
+        await asyncio.Future()
 
     def stop(self):
         logger.info("Stopping orchestrator...")

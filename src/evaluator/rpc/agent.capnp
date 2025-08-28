@@ -10,4 +10,5 @@ interface Agent {
 
     act @0 (obs :Data) -> (action :Tensor);
     reset @1 () -> ();
+    ping @2 (message :Text) -> (response :Text);
 }

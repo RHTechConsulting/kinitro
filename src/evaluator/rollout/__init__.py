@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List
@@ -25,6 +26,7 @@ class RolloutCluster:
         benchmark_specs: list[BenchmarkSpec],
         submission_container_host: str,
         submission_container_port: int,
+        submission_id: SnowflakeId | None = None,
     ) -> ActorProxy:
         worker = RolloutWorker.remote(
             self,
@@ -32,6 +34,7 @@ class RolloutCluster:
             benchmark_specs,
             submission_container_host,
             submission_container_port,
+            submission_id,
         )
         self.workers.append(worker)
         return worker
@@ -51,12 +54,14 @@ class RolloutWorker:
         benchmark_specs: list[BenchmarkSpec],
         submission_container_host: str,
         submission_container_port: int,
+        submission_id: SnowflakeId | None = None,
     ) -> None:
         self.cluster = cluster
         self.rollout_worker_id = rollout_worker_id  # Name of the ray actor
         self.submission_container_host = submission_container_host
         self.submission_container_port = submission_container_port
         self.benchmark_specs = benchmark_specs
+        self.submission_id = submission_id or rollout_worker_id  # Use submission_id if provided
         self.submission_container_address = None
         self.eval_start = None  # Start time of the evaluation
         self.eval_end = None  # End time of the evaluation
@@ -90,87 +95,125 @@ class RolloutWorker:
         )
 
     async def connect_to_agent(self):
-        """Connect to the agent server, ensuring the KJ event loop is running."""
 
         if self.submission_container_address is None:
             raise ValueError("Submission container address not set")
 
         try:
-            # Ensure the KJ event loop is running for Cap'n Proto async RPC
-            print(f"Connecting to agent at {self.submission_container_address}")
             async with capnp.kj_loop():
+                print(f"[Worker] Testing connection to agent at {self.submission_container_address}")
                 await self.agent.connect()
+                
+                # Test with a simple ping
+                response = await self.agent.ping("connection_test")
+                print(f"[Worker] Connection test successful, ping response: {response}")
+                
+                # Close the test connection - we'll reconnect when needed
+                await self.agent.close()
+            
             logger.info(
-                f"Worker {self.rollout_worker_id} connected to agent at {self.submission_container_address}"
+                f"Worker {self.rollout_worker_id} successfully tested connection to agent at {self.submission_container_address}"
             )
         except Exception as e:
             logger.error(f"Failed to connect to agent: {e}")
             raise
 
-    def run_all_benchmark_tasks(self) -> List[EnvResult]:
+    async def run_all_benchmark_tasks(self) -> List[EnvResult]:
         """Run the agent through every test task in every test environment in each benchmark."""
         if not self.benchmark_specs:
             raise ValueError("Benchmark specifications not set")
 
-        # Start evaluation timer
-        self.eval_start = time.time()
+        # Run everything within a single KJ event loop context to maintain RPC connection
+        async def _run_all_tasks_inner():
+            # Connect to agent within the same KJ context where we'll use it
+            if self.submission_container_address is None:
+                raise ValueError("Submission container address not set")
 
-        # Collect all tasks from all benchmarks
-        all_task_specs = []
-        for benchmark_spec in self.benchmark_specs:
-            print(f"Running all tasks for benchmark: {benchmark_spec.benchmark_name}")
-
-            # Get all environment and task combinations for this benchmark
-            task_specs = self.env_manager.get_benchmark_envs(
-                benchmark_spec
-            )  # This now returns all tasks
-            all_task_specs.extend(task_specs)
-            logger.info(
-                f"Worker {self.rollout_worker_id} discovered {len(task_specs)} tasks for {benchmark_spec}"
-            )
-
-        logger.info(
-            f"Worker {self.rollout_worker_id} will evaluate {len(all_task_specs)} total tasks"
-        )
-
-        # Run all tasks
-        task_results = []
-        for i, task_spec in enumerate(all_task_specs):
-            logger.info(f"Running task {i + 1}/{len(all_task_specs)}: {task_spec}")
             try:
-                task_result = self.run_env(task_spec)  # This now runs a specific task
-                task_results.append(task_result)
-
-                # Log task completion
+                print(f"Connecting to agent at {self.submission_container_address}")
+                await self.agent.connect()
                 logger.info(
-                    f"Task {task_spec} completed: "
-                    f"success_rate={task_result.success_rate:.3f}, "
-                    f"mean_reward={task_result.mean_reward:.3f}, "
-                    f"mean_steps={task_result.mean_steps:.1f}"
+                    f"Worker {self.rollout_worker_id} connected to agent at {self.submission_container_address}"
                 )
             except Exception as e:
-                logger.error(f"Failed to run task {task_spec}: {e}")
-                # Continue with other tasks
-                continue
+                logger.error(f"Failed to connect to agent: {e}")
+                raise
 
-        # End evaluation timer
-        self.eval_end = time.time()
+            # Start evaluation timer
+            self.eval_start = time.time()
 
-        # Log summary
-        self._log_evaluation_summary(task_results)
+            # Collect all tasks from all benchmarks
+            all_task_specs = []
+            for benchmark_spec in self.benchmark_specs:
+                print(f"Running all tasks for benchmark: {benchmark_spec.benchmark_name}")
 
-        return task_results
+                # Get all environment and task combinations for this benchmark
+                task_specs = self.env_manager.get_benchmark_envs(
+                    benchmark_spec
+                )  # This now returns all tasks
+                all_task_specs.extend(task_specs)
+                logger.info(
+                    f"Worker {self.rollout_worker_id} discovered {len(task_specs)} tasks for {benchmark_spec}"
+                )
 
-    def run_env(self, env_spec: EnvSpec) -> EnvResult:
+            logger.info(
+                f"Worker {self.rollout_worker_id} will evaluate {len(all_task_specs)} total tasks"
+            )
+
+            # Run all tasks
+            task_results = []
+            for i, task_spec in enumerate(all_task_specs):
+                print(f"\n🚀 [TASK {i + 1}/{len(all_task_specs)}] Starting: {task_spec}")
+                logger.info(f"Running task {i + 1}/{len(all_task_specs)}: {task_spec}")
+                try:
+                    task_result = await self.run_env(task_spec)  # This now runs a specific task
+                    task_results.append(task_result)
+
+                    # Log task completion
+                    print(f"✅ [TASK {i + 1}/{len(all_task_specs)}] Completed: {task_spec}")
+                    print(f"   📊 Success Rate: {task_result.success_rate:.3f}")
+                    print(f"   🎯 Mean Reward: {task_result.mean_reward:.3f}")
+                    print(f"   👣 Mean Steps: {task_result.mean_steps:.1f}")
+                    print(f"   📈 Episodes: {len(task_result.episodes)}")
+                    
+                    logger.info(
+                        f"Task {task_spec} completed: "
+                        f"success_rate={task_result.success_rate:.3f}, "
+                        f"mean_reward={task_result.mean_reward:.3f}, "
+                        f"mean_steps={task_result.mean_steps:.1f}"
+                    )
+                except Exception as e:
+                    print(f"❌ [TASK {i + 1}/{len(all_task_specs)}] Failed: {task_spec} - {e}")
+                    logger.error(f"Failed to run task {task_spec}: {e}")
+                    # Continue with other tasks
+                    continue
+
+            # End evaluation timer
+            self.eval_end = time.time()
+
+            # Log summary
+            self._log_evaluation_summary(task_results)
+
+            return task_results
+
+        # Run everything within KJ event loop context to maintain RPC connection
+        async with capnp.kj_loop():
+            return await _run_all_tasks_inner()
+
+    async def run_env(self, env_spec: EnvSpec) -> EnvResult:
         """Run all episodes for a single environment."""
-        # Create environment for this spec
-        env = self.env_manager.make_env(env_spec)
+        # Create environment for this spec with image saving enabled
+        env = self.env_manager.make_env(
+            env_spec, 
+            save_images=True, 
+            submission_id=str(self.submission_id)
+        )
 
         # Run multiple episodes for this environment
         episodes = []
         for episode_id in range(self.episodes_per_task):
             try:
-                episode_result = self.run_episode(
+                episode_result = await self.run_episode(
                     env, self.agent, env_spec, episode_id, self.max_steps_per_episode
                 )
                 episodes.append(episode_result)
@@ -188,7 +231,7 @@ class RolloutWorker:
 
         return env_result
 
-    def run_episode(self, env, agent, env_spec, episode_id, max_steps):
+    async def run_episode(self, env, agent, env_spec, episode_id, max_steps):
         """Run a single episode with the given environment and agent."""
         logger.info(f"Starting episode {episode_id} for environment {env_spec}")
 
@@ -202,17 +245,37 @@ class RolloutWorker:
 
         while not done and step_count < max_steps:
             try:
-                action = agent.act(observation)
+                # Debug observation before sending to agent
+                if step_count == 0:  # Only log first step to avoid spam
+                    print(f"[Episode] Observation type: {type(observation)}")
+                    if hasattr(observation, 'shape'):
+                        print(f"[Episode] Observation shape: {observation.shape}")
+                    elif hasattr(observation, '__len__'):
+                        print(f"[Episode] Observation length: {len(observation)}")
+                    import sys
+                    obs_size = sys.getsizeof(observation)
+                    print(f"[Episode] Observation memory size: {obs_size} bytes")
+
+                print(f"[Episode {episode_id}] Step {step_count + 1}: Getting action from agent...")
+                action = await agent.act(observation)
+                print(f"[Episode {episode_id}] Step {step_count + 1}: Received action, executing environment step...")
+                
                 observation, reward, terminated, truncated, info = env.step(action)
 
                 total_reward += reward
                 step_count += 1
                 done = terminated or truncated
 
+                print(f"[Episode {episode_id}] Step {step_count}: reward={reward:.3f}, total_reward={total_reward:.3f}, done={done}")
+
                 # Record step
                 episode_steps.append(
                     {"step": step_count, "reward": reward, "done": done, "info": info}
                 )
+
+                # Log progress every 10 steps
+                if step_count % 10 == 0:
+                    print(f"[Episode {episode_id}] Progress: {step_count}/{max_steps} steps, total_reward={total_reward:.3f}")
 
             except Exception as e:
                 logger.error(
@@ -238,7 +301,7 @@ class RolloutWorker:
 
         return episode_result
 
-    def run_episodes(self, env_specs: List[EnvSpec]) -> List[EnvResult]:
+    async def run_episodes(self, env_specs: List[EnvSpec]) -> List[EnvResult]:
         """Run episodes for a list of specific environments."""
         # Start evaluation timer
         self.eval_start = time.time()
@@ -248,7 +311,7 @@ class RolloutWorker:
         for i, env_spec in enumerate(env_specs):
             logger.info(f"Running environment {i + 1}/{len(env_specs)}: {env_spec}")
             try:
-                env_result = self.run_env(env_spec)
+                env_result = await self.run_env(env_spec)
                 env_results.append(env_result)
 
                 # Log environment completion
@@ -310,3 +373,5 @@ class RolloutWorker:
             "episodes_per_task": self.episodes_per_task,
             "max_steps_per_episode": self.max_steps_per_episode,
         }
+
+
