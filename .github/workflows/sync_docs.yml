@@ -1,0 +1,52 @@
+name: Sync docs to the website
+
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+  workflow_dispatch:
+
+env:
+  STAGING_DIR: staging
+
+jobs:
+  sync-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo (this repo)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout destination repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.KINITRO_WEBSITE_REPO_NAME }}
+          token: ${{ secrets.KINITRO_WEBSITE_REPO_ACCESS_TOKEN }}
+          ref: main
+          path: ${{ env.STAGING_DIR }}
+          fetch-depth: 1
+
+      - name: Copy files
+        shell: bash
+        run: |
+          rm -rf "${{ env.STAGING_DIR }}/docs/*"
+          cp -rf docs "${{ env.STAGING_DIR }}/docs"
+
+      - name: Commit and push changes
+        shell: bash
+        run: |
+          cd "${{ env.STAGING_DIR }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "Sync docs from kinitro: ${GITHUB_SHA}"
+            git push origin HEAD:main
+          else
+            echo "No changes to commit."
+          fi
