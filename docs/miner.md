@@ -1,0 +1,5 @@
+---
+section: 'Get Started'
+---
+
+# Miner

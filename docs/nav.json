@@ -1,0 +1,17 @@
+{
+  "sections": [
+    {
+      "label": "Get Started",
+      "items": ["overview", "miner", "validator"]
+    },
+    {
+      "label": "Core Concepts",
+      "items": [
+        "architecture/introduction",
+        { "page": "architecture/incentive", "label": "Incentive Mechanism" },
+        "architecture/orchestrator",
+        "architecture/evaluator"
+      ]
+    }
+  ]
+}
