@@ -20,9 +20,6 @@ agent_capnp = capnp.load(schema_file)
 
 logger = logging.getLogger(__name__)
 
-# Tune this for testing; lower for production if payloads are small
-_TRAVERSAL_WORDS = 100 * 1024 * 1024  # 100M words ~ 800MB
-
 
 class AgentClient:
     """Client for connecting to Agent RPC server. Sends observations as Tensor struct."""

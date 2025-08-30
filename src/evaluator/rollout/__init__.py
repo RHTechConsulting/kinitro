@@ -13,6 +13,7 @@ from core.db.models import SnowflakeId
 from core.log import get_logger
 
 from ..rpc.client import AgentClient
+from ..rpc.rpc_process import RPCRequest
 from .envs import BenchmarkSpec, EnvManager, EnvResult, EnvSpec, EpisodeResult
 
 logger = get_logger(__name__)
@@ -75,8 +76,8 @@ class RolloutWorker:
         self.agent: AgentClient | None = None
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
-        await send_queue.put_async("ray-ping")
-        print(f"[Worker {self.rollout_worker_id}] RPC test ping sent")
+        rpc_msg = RPCRequest.create_ping("ray-ping")
+        await send_queue.put_async(rpc_msg)
         while True:
             try:
                 resp = await recv_queue.get_async()
