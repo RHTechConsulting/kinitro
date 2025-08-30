@@ -246,7 +246,7 @@ class RPCProcess:
                     
                     # Log the result
                     if response.success:
-                        result_preview = str(response.result)[:50] if response.result else "None"
+                        result_preview = str(response.result)[:50] if response.result is not None else "None"
                         print(f"RPC[{self.host}:{self.port}] success: id={request.request_id[:8]}, result={result_preview}")
                     else:
                         print(f"RPC[{self.host}:{self.port}] error: id={request.request_id[:8]}, error={response.error_message}")

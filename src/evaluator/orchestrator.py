@@ -86,8 +86,8 @@ class Orchestrator:
                 config={"env_name": evaluationJob.env_name}
                 if hasattr(evaluationJob, "env_name")
                 else {},
-                enable_image_obs=False,  # Disable image observations for now
-                render_mode=None,  # No rendering
+                enable_image_obs=True,  # Disable image observations for now
+                render_mode="rgb_array",  # No rendering
             )
 
             worker_to_rpc_queue = Queue(maxsize=100)   # Worker sends TO rpc process
@@ -111,30 +111,30 @@ class Orchestrator:
             res = await worker.test_rpc.remote(worker_to_rpc_queue, rpc_to_worker_queue)
             print(f"rpc test result: {res}")
 
-            # # Start the actual evaluation
-            # print("Starting evaluation...")
-            # try:
-            #     # Run all benchmark tasks
-            #     evaluation_future = worker.run_all_benchmark_tasks.remote()
-            #     results = ray.get(evaluation_future, timeout=3600)  # 1 hour timeout for evaluation
+            # Start the actual evaluation
+            print("Starting evaluation...")
+            try:
+                # Run all benchmark tasks
+                evaluation_future = worker.run_all_benchmark_tasks.remote(worker_to_rpc_queue, rpc_to_worker_queue)
+                results = ray.get(evaluation_future, timeout=3600)  # 1 hour timeout for evaluation
                 
-            #     print(f"Evaluation completed successfully with {len(results)} results")
-            #     print(f"Summary: {len(results)} tasks completed")
+                print(f"Evaluation completed successfully with {len(results)} results")
+                print(f"Summary: {len(results)} tasks completed")
                 
-            #     # Log success metrics
-            #     if results:
-            #         total_episodes = sum(len(result.episodes) for result in results)
-            #         avg_success_rate = sum(result.success_rate for result in results) / len(results)
-            #         avg_reward = sum(result.mean_reward for result in results) / len(results)
+                # Log success metrics
+                if results:
+                    total_episodes = sum(len(result.episodes) for result in results)
+                    avg_success_rate = sum(result.success_rate for result in results) / len(results)
+                    avg_reward = sum(result.mean_reward for result in results) / len(results)
                     
-            #         print(f"Total episodes: {total_episodes}")
-            #         print(f"Average success rate: {avg_success_rate:.3f}")
-            #         print(f"Average reward: {avg_reward:.3f}")
+                    print(f"Total episodes: {total_episodes}")
+                    print(f"Average success rate: {avg_success_rate:.3f}")
+                    print(f"Average reward: {avg_reward:.3f}")
                 
-            # except Exception as e:
-            #     print(f"Evaluation failed: {e}")
-            #     logger.error(f"Evaluation failed for job {evaluationJob.id}: {e}")
-            #     raise
+            except Exception as e:
+                print(f"Evaluation failed: {e}")
+                logger.error(f"Evaluation failed for job {evaluationJob.id}: {e}")
+                raise
             
             logger.info(f"Processed: {evaluationJob!r}")
 

@@ -67,7 +67,7 @@ class AgentClient:
         """Convert a numpy array observation to a Capnp Tensor struct (client-side builder)."""
         if not hasattr(obs, "tobytes") or not hasattr(obs, "shape") or not hasattr(obs, "dtype"):
             raise TypeError("Observation must be a numpy ndarray-like object")
-        msg = agent_capnp.Agent.Tensor.new_message()
+        msg = agent_capnp.Tensor.new_message()
         msg.data = obs.tobytes()
         msg.shape = [int(s) for s in obs.shape]
         msg.dtype = str(obs.dtype)

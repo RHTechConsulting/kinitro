@@ -50,7 +50,7 @@ class AgentServer(agent_capnp.Agent.Server):
                 action_np = np.array(action_tensor)
 
             # Build response Tensor
-            response = agent_capnp.Agent.Tensor.new_message()
+            response = agent_capnp.Tensor.new_message()
             response.data = action_np.tobytes()
             response.shape = [int(s) for s in action_np.shape]
             response.dtype = str(action_np.dtype)

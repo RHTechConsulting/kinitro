@@ -12,7 +12,6 @@ from ray.util.queue import Queue
 from core.db.models import SnowflakeId
 from core.log import get_logger
 
-from ..rpc.client import AgentClient
 from ..rpc.rpc_process import RPCRequest
 from .envs import BenchmarkSpec, EnvManager, EnvResult, EnvSpec, EpisodeResult
 
@@ -72,8 +71,12 @@ class RolloutWorker:
         self.benchmark_specs = benchmark_specs
         self.submission_id = submission_id or rollout_worker_id
         self.submission_container_address = f"{submission_container_host}:{submission_container_port}"
-        # RPC client
-        self.agent: AgentClient | None = None
+        self.env_manager = EnvManager()
+        self.episodes_per_task = 1
+        self.max_steps_per_episode = 25
+        self.eval_start = None
+        self.eval_end = None
+
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
@@ -91,22 +94,13 @@ class RolloutWorker:
                 break
 
 
-    async def run_all_benchmark_tasks(self) -> List[EnvResult]:
+    async def run_all_benchmark_tasks(self, send_queue: Queue, recv_queue: Queue) -> List[EnvResult]:
         if not self.benchmark_specs:
             raise ValueError("Benchmark specifications not set")
 
         async def _run_all_tasks_inner():
             if self.submission_container_address is None:
                 raise ValueError("Submission container address not set")
-
-            # Connect once in the kj_loop context
-            try:
-                logger.info("Connecting to agent at %s", self.submission_container_address)
-                await self.agent.connect()
-                logger.info("Worker %s connected to agent", self.rollout_worker_id)
-            except Exception:
-                logger.exception("Failed to connect to agent")
-                raise
 
             self.eval_start = time.time()
 
@@ -123,7 +117,7 @@ class RolloutWorker:
             for i, task_spec in enumerate(all_task_specs):
                 logger.info("Starting task %d/%d: %s", i + 1, len(all_task_specs), task_spec)
                 try:
-                    task_result = await self.run_env(task_spec)
+                    task_result = await self.run_env(task_spec, send_queue, recv_queue)
                     task_results.append(task_result)
                     logger.info("Completed task %s: success_rate=%f mean_reward=%f mean_steps=%f",
                                 task_spec, task_result.success_rate, task_result.mean_reward, task_result.mean_steps)
@@ -133,19 +127,18 @@ class RolloutWorker:
 
             self.eval_end = time.time()
             self._log_evaluation_summary(task_results)
-            await self.agent.close()
             return task_results
 
         async with capnp.kj_loop():
             return await _run_all_tasks_inner()
 
-    async def run_env(self, env_spec: EnvSpec) -> EnvResult:
+    async def run_env(self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue) -> EnvResult:
         env = self.env_manager.make_env(env_spec, save_images=True, submission_id=str(self.submission_id))
 
         episodes = []
         for episode_id in range(self.episodes_per_task):
             try:
-                episode_result = await self.run_episode(env, self.agent, env_spec, episode_id, self.max_steps_per_episode)
+                episode_result = await self.run_episode(env, env_spec, episode_id, self.max_steps_per_episode, send_queue, recv_queue)
                 episodes.append(episode_result)
             except Exception:
                 logger.exception("Failed episode %d for %s", episode_id, env_spec)
@@ -154,7 +147,7 @@ class RolloutWorker:
         env.close()
         return EnvResult.from_episodes(env_spec, episodes)
 
-    async def run_episode(self, env, agent, env_spec, episode_id, max_steps):
+    async def run_episode(self, env, env_spec, episode_id, max_steps, send_queue: Queue, recv_queue: Queue):
         logger.info("Starting episode %d for env %s", episode_id, env_spec)
 
         # Reset may return (obs, info) or just obs depending on gym
@@ -185,12 +178,22 @@ class RolloutWorker:
                 else:
                     obs_arr = np.asarray(observation)
 
-                # Call RPC (this runs inside kj_loop)
-                action_tensor = await agent.act(obs_arr)
+                rpc_msg = RPCRequest.create_act(obs_arr)
+                await send_queue.put_async(rpc_msg)
+                resp = await recv_queue.get_async()
+                action_tensor = resp.result
                 if isinstance(action_tensor, torch.Tensor):
                     action_arr = action_tensor.detach().cpu().numpy()
                 else:
                     action_arr = np.asarray(action_tensor)
+
+                # Ensure action_arr is a proper numpy array
+                if not isinstance(action_arr, np.ndarray):
+                    action_arr = np.asarray(action_arr)
+
+                # Ensure it's not a 0-d array that might cause issues
+                if action_arr.ndim == 0:
+                    action_arr = np.array([action_arr.item()])
 
                 # Step env
                 step_result = env.step(action_arr)
