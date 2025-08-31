@@ -18,6 +18,10 @@ agent_capnp = capnp.load(schema_file)
 
 logger = logging.getLogger(__name__)
 
+# Default network configuration
+DEFAULT_RPC_ADDRESS = "127.0.0.1"
+DEFAULT_RPC_PORT = 8000
+
 _TRAVERSAL_WORDS = 100 * 1024 * 1024  # match client; tune appropriately
 
 
@@ -34,11 +38,17 @@ class AgentServer(agent_capnp.Agent.Server):
         try:
             # obs is a struct with .data, .shape, .dtype
             byte_len = len(obs.data) if obs and obs.data is not None else 0
-            self.logger.debug("Server.act invoked; incoming obs bytes=%d shape=%s dtype=%s",
-                              byte_len, list(obs.shape) if obs else None, obs.dtype if obs else None)
+            self.logger.debug(
+                "Server.act invoked; incoming obs bytes=%d shape=%s dtype=%s",
+                byte_len,
+                list(obs.shape) if obs else None,
+                obs.dtype if obs else None,
+            )
 
             # reconstruct numpy observation
-            obs_np = np.frombuffer(obs.data, dtype=np.dtype(obs.dtype)).reshape(tuple(obs.shape))
+            obs_np = np.frombuffer(obs.data, dtype=np.dtype(obs.dtype)).reshape(
+                tuple(obs.shape)
+            )
 
             # call the underlying agent synchronously (user's agent.act should accept ndarray)
             action_tensor = self.agent.act(obs_np)
@@ -71,13 +81,16 @@ class AgentServer(agent_capnp.Agent.Server):
         return "pong"
 
 
-async def serve(agent, address="127.0.0.1", port=8000):
+async def serve(agent, address=DEFAULT_RPC_ADDRESS, port=DEFAULT_RPC_PORT):
     """Serve the agent using asyncio approach"""
 
     async def new_connection(stream):
         try:
-            server = capnp.TwoPartyServer(stream, bootstrap=AgentServer(agent),
-                                          traversal_limit_in_words=_TRAVERSAL_WORDS)
+            server = capnp.TwoPartyServer(
+                stream,
+                bootstrap=AgentServer(agent),
+                traversal_limit_in_words=_TRAVERSAL_WORDS,
+            )
             await server.on_disconnect()
         except Exception:
             logger.exception("Error handling connection")
@@ -94,7 +107,7 @@ async def serve(agent, address="127.0.0.1", port=8000):
         logger.info("Server shutting down")
 
 
-def start_server(agent, address="127.0.0.1", port=8000):
+def start_server(agent, address=DEFAULT_RPC_ADDRESS, port=DEFAULT_RPC_PORT):
     async def run_server_with_kj():
         async with capnp.kj_loop():
             await serve(agent, address, port)
@@ -105,7 +118,7 @@ def start_server(agent, address="127.0.0.1", port=8000):
         logger.info("Server stopped by user")
 
 
-def run_server_in_process(agent, address="127.0.0.1", port=8000):
+def run_server_in_process(agent, address=DEFAULT_RPC_ADDRESS, port=DEFAULT_RPC_PORT):
     async def run_with_kj():
         async with capnp.kj_loop():
             await serve(agent, address, port)

@@ -8,7 +8,6 @@ Handles promise vs coroutine returns, timeouts, and traversal limit.
 import asyncio
 import logging
 import os
-from typing import Tuple
 
 import capnp
 import numpy as np
@@ -39,9 +38,10 @@ class AgentClient:
             return
 
         try:
-            print(f"Connecting to {self.address}:{self.port}")
             self.stream = await asyncio.wait_for(
-                capnp.AsyncIoStream.create_connection(host=self.address, port=self.port),
+                capnp.AsyncIoStream.create_connection(
+                    host=self.address, port=self.port
+                ),
                 timeout=timeout,
             )
 
@@ -50,7 +50,7 @@ class AgentClient:
             print(f"TwoPartyClient established to {self.address}:{self.port}")
 
             self.agent = self.client.bootstrap().cast_as(agent_capnp.Agent)
-            print(f"Bootstrapped Agent capability")
+            print("Bootstrapped Agent capability")
         except Exception:
             logger.exception("Failed to connect to agent")
             raise
@@ -65,7 +65,11 @@ class AgentClient:
 
     def _obs_to_tensor_struct(self, obs: np.ndarray):
         """Convert a numpy array observation to a Capnp Tensor struct (client-side builder)."""
-        if not hasattr(obs, "tobytes") or not hasattr(obs, "shape") or not hasattr(obs, "dtype"):
+        if (
+            not hasattr(obs, "tobytes")
+            or not hasattr(obs, "shape")
+            or not hasattr(obs, "dtype")
+        ):
             raise TypeError("Observation must be a numpy ndarray-like object")
         msg = agent_capnp.Tensor.new_message()
         msg.data = obs.tobytes()
@@ -84,16 +88,23 @@ class AgentClient:
         # Build Tensor message for observation
         try:
             obs_msg = self._obs_to_tensor_struct(obs)
-            logger.debug("AgentClient.act: sending obs shape=%s dtype=%s bytes=%d",
-                         obs.shape, obs.dtype, obs.tobytes().__len__())
+            logger.debug(
+                "AgentClient.act: sending obs shape=%s dtype=%s bytes=%d",
+                obs.shape,
+                obs.dtype,
+                obs.tobytes().__len__(),
+            )
         except Exception:
             logger.exception("Failed to prepare observation tensor")
             raise
 
         try:
             maybe_promise = self.agent.act(obs_msg)
-            logger.debug("AgentClient.act: call returned type=%s has_a_wait=%s",
-                         type(maybe_promise), hasattr(maybe_promise, "a_wait"))
+            logger.debug(
+                "AgentClient.act: call returned type=%s has_a_wait=%s",
+                type(maybe_promise),
+                hasattr(maybe_promise, "a_wait"),
+            )
 
             result = await self._await_capnp_result(maybe_promise, timeout=timeout)
 
@@ -106,7 +117,11 @@ class AgentClient:
             shape = tuple(result.action.shape)
             dtype_str = result.action.dtype
 
-            action_np = np.frombuffer(action_data, dtype=np.dtype(dtype_str)).reshape(shape).copy()
+            action_np = (
+                np.frombuffer(action_data, dtype=np.dtype(dtype_str))
+                .reshape(shape)
+                .copy()
+            )
             return torch.from_numpy(action_np)
         except asyncio.TimeoutError:
             logger.error("Agent call timed out after %.1fs", timeout)

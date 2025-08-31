@@ -32,8 +32,9 @@ def configure_headless_rendering():
     """Configure environment variables for headless MuJoCo rendering using EGL."""
     if "DISPLAY" not in os.environ:
         # Only configure headless mode if no display is available
-        os.environ["MUJOCO_GL"] = "egl"
-        os.environ["PYOPENGL_PLATFORM"] = "egl"
+        # TODO: set this to be egl instead of glfw?
+        os.environ["MUJOCO_GL"] = "glfw"
+        os.environ["PYOPENGL_PLATFORM"] = "glfw"
         logger.info("Configured headless rendering with EGL backend")
     else:
         logger.info("Display available, using default OpenGL rendering")

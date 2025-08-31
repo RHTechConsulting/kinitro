@@ -17,6 +17,7 @@ from .envs import BenchmarkSpec, EnvManager, EnvResult, EnvSpec, EpisodeResult
 
 logger = get_logger(__name__)
 
+LOGGING_INTERVAL = 10
 
 class RolloutCluster:
     def __init__(self, cluster_name: str):
@@ -210,7 +211,7 @@ class RolloutWorker:
 
                 episode_steps.append({"step": step_count, "reward": reward, "done": done, "info": info})
 
-                if step_count % 10 == 0:
+                if step_count % LOGGING_INTERVAL == 0:
                     logger.info("Episode %d progress: %d/%d steps, total_reward=%.3f", episode_id, step_count, max_steps, total_reward)
 
             except Exception:
