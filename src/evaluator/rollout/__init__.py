@@ -1,7 +1,6 @@
 import asyncio
 import time
 from typing import Any, Dict, List
-import multiprocessing
 
 import capnp
 import numpy as np

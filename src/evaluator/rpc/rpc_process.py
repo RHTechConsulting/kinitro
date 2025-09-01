@@ -1,13 +1,15 @@
 import asyncio
-import capnp
-from ray.util.queue import Queue
-from evaluator.rpc.client import AgentClient
-from snowflake import SnowflakeGenerator
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional
+
+import capnp
 import numpy as np
 import torch
-from enum import Enum
+from ray.util.queue import Queue
+from snowflake import SnowflakeGenerator
+
+from evaluator.rpc.client import AgentClient
 
 # RPC timeout constant
 DEFAULT_RPC_TIMEOUT = 5.0
