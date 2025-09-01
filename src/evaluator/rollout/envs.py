@@ -153,24 +153,24 @@ class MultiViewImageObsWrapper(ObservationWrapper):
         self._img_h, self._img_w = int(image_size[0]), int(image_size[1])
         self._camera_attribute = camera_attribute
         self._camera_names = tuple(camera_names) if camera_names else tuple()
-        
+
         # Image saving configuration
         self._save_images = save_images
         self._submission_id = submission_id
         self._step_count = 0
         self._episode_count = 0
-        
+
         # Setup image save directory if enabled
         if self._save_images and image_save_dir:
             self._image_save_dir = Path(image_save_dir)
             if self._submission_id:
                 self._image_save_dir = self._image_save_dir / str(self._submission_id)
-            
+
             # Create directories for each camera
             for camera_name in self._camera_names:
                 camera_dir = self._image_save_dir / camera_name
                 camera_dir.mkdir(parents=True, exist_ok=True)
-                
+
             logger.info(f"Image saving enabled to: {self._image_save_dir}")
         else:
             self._image_save_dir = None
@@ -257,6 +257,8 @@ class MultiViewImageObsWrapper(ObservationWrapper):
             camera_names_used.append("default")
 
         # Save images to disk if enabled
+        # TODO: we'd want to save images in an R2 bucket or something
+        # and we'd want to do it elsewhere, not *inside* of observation() lol
         if self._save_images and self._image_save_dir:
             self._save_images_to_disk(images_hwc, camera_names_used)
 
@@ -268,30 +270,34 @@ class MultiViewImageObsWrapper(ObservationWrapper):
         # For now, return base observation directly to avoid RPC message size limits
         # Images are still saved to disk for analysis
         # This avoids both the concatenation issue and the message size problem
-        
+
         # Increment step counter
         self._step_count += 1
-        
+
         # Return the original observation to avoid serialization issues
         return obs
-    
-    def _save_images_to_disk(self, images_hwc: list[np.ndarray], camera_names: list[str]) -> None:
+
+    def _save_images_to_disk(
+        self, images_hwc: list[np.ndarray], camera_names: list[str]
+    ) -> None:
         """Save rendered images to disk organized by camera."""
         try:
             for img, camera_name in zip(images_hwc, camera_names):
                 if self._image_save_dir:
                     camera_dir = self._image_save_dir / camera_name
-                    filename = f"ep{self._episode_count:04d}_step{self._step_count:06d}.png"
+                    filename = (
+                        f"ep{self._episode_count:04d}_step{self._step_count:06d}.png"
+                    )
                     filepath = camera_dir / filename
-                    
+
                     # Convert numpy array to PIL Image and save
                     # img is HWC format, convert to PIL format
                     pil_img = Image.fromarray(img.astype(np.uint8))
                     pil_img.save(filepath)
-                    
+
         except Exception as e:
             logger.warning(f"Failed to save image: {e}")
-    
+
     def reset(self, **kwargs):
         """Reset the environment and increment episode counter."""
         self._episode_count += 1
@@ -450,7 +456,12 @@ class EnvManager:
         )
         return envs
 
-    def make_env(self, env_spec: EnvSpec, save_images: bool = False, submission_id: str | None = None) -> gym.Env:
+    def make_env(
+        self,
+        env_spec: EnvSpec,
+        save_images: bool = False,
+        submission_id: str | None = None,
+    ) -> gym.Env:
         """Create an environment for a specific environment spec."""
         if env_spec.provider == "metaworld":
             env = self._make_metaworld_env(env_spec)
@@ -491,7 +502,7 @@ class EnvManager:
         config = env_spec.config
         benchmark = env_spec.benchmark_name
         env_name = env_spec.env_name
-        
+
         # Use appropriate render mode - None for headless, rgb_array for rendering
         render_mode = env_spec.render_mode if env_spec.enable_image_obs else None
 

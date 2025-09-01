@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 
 LOGGING_INTERVAL = 10
 
+
 class RolloutCluster:
     def __init__(self, cluster_name: str):
         self.name = cluster_name  # Ray namespace
@@ -32,7 +33,9 @@ class RolloutCluster:
         submission_container_port: int,
         submission_id: SnowflakeId | None = None,
     ) -> ray.actor.ActorHandle:
-        logger.info(f"Creating worker: {rollout_worker_id}, {benchmark_specs}, {submission_container_host}, {submission_container_port}, {submission_id}")  
+        logger.info(
+            f"Creating worker: {rollout_worker_id}, {benchmark_specs}, {submission_container_host}, {submission_container_port}, {submission_id}"
+        )
         worker = RolloutWorker.remote(
             self.name,
             rollout_worker_id,
@@ -59,7 +62,6 @@ class RolloutWorker:
         submission_container_host: str,
         submission_container_port: int,
         submission_id: SnowflakeId | None = None,
-
     ) -> None:
         logger.info(
             f"RolloutWorker init: {cluster_name}, {rollout_worker_id}, {benchmark_specs}, "
@@ -71,13 +73,15 @@ class RolloutWorker:
         self.submission_container_port = submission_container_port
         self.benchmark_specs = benchmark_specs
         self.submission_id = submission_id or rollout_worker_id
-        self.submission_container_address = f"{submission_container_host}:{submission_container_port}"
+        self.submission_container_address = (
+            f"{submission_container_host}:{submission_container_port}"
+        )
         self.env_manager = EnvManager()
+        # TODO: these should be based on the benchmarks specs, not hardcoded
         self.episodes_per_task = 1
         self.max_steps_per_episode = 25
         self.eval_start = None
         self.eval_end = None
-
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
@@ -85,7 +89,9 @@ class RolloutWorker:
         while True:
             try:
                 resp = await recv_queue.get_async()
-                print(f"[Worker {self.rollout_worker_id}] RPC test ping response={resp}")
+                print(
+                    f"[Worker {self.rollout_worker_id}] RPC test ping response={resp}"
+                )
                 return resp
             except asyncio.CancelledError:
                 print(f"[Worker {self.rollout_worker_id}] RPC test cancelled")
@@ -94,8 +100,9 @@ class RolloutWorker:
                 print(f"[Worker {self.rollout_worker_id}] Error getting response: {e}")
                 break
 
-
-    async def run_all_benchmark_tasks(self, send_queue: Queue, recv_queue: Queue) -> List[EnvResult]:
+    async def run_all_benchmark_tasks(
+        self, send_queue: Queue, recv_queue: Queue
+    ) -> List[EnvResult]:
         if not self.benchmark_specs:
             raise ValueError("Benchmark specifications not set")
 
@@ -107,21 +114,32 @@ class RolloutWorker:
 
             all_task_specs = []
             for benchmark_spec in self.benchmark_specs:
-                logger.info("Running all tasks for benchmark: %s", benchmark_spec.benchmark_name)
+                logger.info(
+                    "Running all tasks for benchmark: %s", benchmark_spec.benchmark_name
+                )
                 task_specs = self.env_manager.get_benchmark_envs(benchmark_spec)
                 all_task_specs.extend(task_specs)
-                logger.info("Discovered %d tasks for %s", len(task_specs), benchmark_spec)
+                logger.info(
+                    "Discovered %d tasks for %s", len(task_specs), benchmark_spec
+                )
 
             logger.info("Will evaluate %d total tasks", len(all_task_specs))
 
             task_results = []
             for i, task_spec in enumerate(all_task_specs):
-                logger.info("Starting task %d/%d: %s", i + 1, len(all_task_specs), task_spec)
+                logger.info(
+                    "Starting task %d/%d: %s", i + 1, len(all_task_specs), task_spec
+                )
                 try:
                     task_result = await self.run_env(task_spec, send_queue, recv_queue)
                     task_results.append(task_result)
-                    logger.info("Completed task %s: success_rate=%f mean_reward=%f mean_steps=%f",
-                                task_spec, task_result.success_rate, task_result.mean_reward, task_result.mean_steps)
+                    logger.info(
+                        "Completed task %s: success_rate=%f mean_reward=%f mean_steps=%f",
+                        task_spec,
+                        task_result.success_rate,
+                        task_result.mean_reward,
+                        task_result.mean_steps,
+                    )
                 except Exception:
                     logger.exception("Failed to run task %s", task_spec)
                     continue
@@ -133,13 +151,24 @@ class RolloutWorker:
         async with capnp.kj_loop():
             return await _run_all_tasks_inner()
 
-    async def run_env(self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue) -> EnvResult:
-        env = self.env_manager.make_env(env_spec, save_images=True, submission_id=str(self.submission_id))
+    async def run_env(
+        self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue
+    ) -> EnvResult:
+        env = self.env_manager.make_env(
+            env_spec, save_images=True, submission_id=str(self.submission_id)
+        )
 
         episodes = []
         for episode_id in range(self.episodes_per_task):
             try:
-                episode_result = await self.run_episode(env, env_spec, episode_id, self.max_steps_per_episode, send_queue, recv_queue)
+                episode_result = await self.run_episode(
+                    env,
+                    env_spec,
+                    episode_id,
+                    self.max_steps_per_episode,
+                    send_queue,
+                    recv_queue,
+                )
                 episodes.append(episode_result)
             except Exception:
                 logger.exception("Failed episode %d for %s", episode_id, env_spec)
@@ -148,7 +177,9 @@ class RolloutWorker:
         env.close()
         return EnvResult.from_episodes(env_spec, episodes)
 
-    async def run_episode(self, env, env_spec, episode_id, max_steps, send_queue: Queue, recv_queue: Queue):
+    async def run_episode(
+        self, env, env_spec, episode_id, max_steps, send_queue: Queue, recv_queue: Queue
+    ):
         logger.info("Starting episode %d for env %s", episode_id, env_spec)
 
         # Reset may return (obs, info) or just obs depending on gym
@@ -167,13 +198,22 @@ class RolloutWorker:
         while not done and step_count < max_steps:
             try:
                 if step_count == 0:
-                    logger.debug("Episode first obs type=%s shape=%s", type(observation), getattr(observation, "shape", None))
+                    logger.debug(
+                        "Episode first obs type=%s shape=%s",
+                        type(observation),
+                        getattr(observation, "shape", None),
+                    )
 
                 if not hasattr(observation, "tobytes"):
                     # if observation is a dict (gym.Dict), flatten to concatenated array or handle appropriately
                     # simple fallback: try to convert dict of arrays to concatenated vector
                     if isinstance(observation, dict):
-                        obs_arr = np.concatenate([np.asarray(v).ravel() for _, v in sorted(observation.items())])
+                        obs_arr = np.concatenate(
+                            [
+                                np.asarray(v).ravel()
+                                for _, v in sorted(observation.items())
+                            ]
+                        )
                     else:
                         obs_arr = np.asarray(observation)
                 else:
@@ -209,13 +249,23 @@ class RolloutWorker:
                 total_reward += float(reward)
                 step_count += 1
 
-                episode_steps.append({"step": step_count, "reward": reward, "done": done, "info": info})
+                episode_steps.append(
+                    {"step": step_count, "reward": reward, "done": done, "info": info}
+                )
 
                 if step_count % LOGGING_INTERVAL == 0:
-                    logger.info("Episode %d progress: %d/%d steps, total_reward=%.3f", episode_id, step_count, max_steps, total_reward)
+                    logger.info(
+                        "Episode %d progress: %d/%d steps, total_reward=%.3f",
+                        episode_id,
+                        step_count,
+                        max_steps,
+                        total_reward,
+                    )
 
             except Exception:
-                logger.exception("Error during step %d in episode %d", step_count, episode_id)
+                logger.exception(
+                    "Error during step %d in episode %d", step_count, episode_id
+                )
                 break
 
         episode_duration = time.time() - episode_start
@@ -229,7 +279,13 @@ class RolloutWorker:
             info={"duration": episode_duration, "episode_steps": episode_steps},
         )
 
-        logger.info("Episode %d completed: steps=%d reward=%.2f success=%s", episode_id, step_count, total_reward, episode_result.success)
+        logger.info(
+            "Episode %d completed: steps=%d reward=%.2f success=%s",
+            episode_id,
+            step_count,
+            total_reward,
+            episode_result.success,
+        )
         return episode_result
 
     async def run_episodes(self, env_specs: List[EnvSpec]) -> List[EnvResult]:
@@ -253,10 +309,16 @@ class RolloutWorker:
             return
 
         total_episodes = sum(len(er.episodes) for er in env_results)
-        mean_success_rate = sum(er.success_rate for er in env_results) / len(env_results)
+        mean_success_rate = sum(er.success_rate for er in env_results) / len(
+            env_results
+        )
         mean_reward = sum(er.mean_reward for er in env_results) / len(env_results)
         mean_steps = sum(er.mean_steps for er in env_results) / len(env_results)
-        eval_duration = (self.eval_end - self.eval_start) if (self.eval_start and self.eval_end) else 0.0
+        eval_duration = (
+            (self.eval_end - self.eval_start)
+            if (self.eval_start and self.eval_end)
+            else 0.0
+        )
 
         logger.info("=== Evaluation Summary ===")
         logger.info("Worker: %s", self.rollout_worker_id)
