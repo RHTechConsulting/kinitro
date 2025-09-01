@@ -1,2 +1,2 @@
-pg_database = "postgresql://postgres@localhost/postgres"
-duck_db = "./data/evaluator.duckdb"
+pg_database = "postgresql://postgres@localhost/kinitrodb"
+duck_db = "./evaluator.duckdb"
