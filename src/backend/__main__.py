@@ -63,7 +63,7 @@ class CompetitionCreate(BaseModel):
 
     name: str
     description: Optional[str] = None
-    benchmarks: List[str]
+    benchmarks: List[dict]
     points: int = Field(gt=0)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -75,7 +75,7 @@ class CompetitionResponse(BaseModel):
     id: str
     name: str
     description: Optional[str]
-    benchmarks: List[str]
+    benchmarks: List[dict]
     points: int
     active: bool
     start_time: Optional[datetime]

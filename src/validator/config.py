@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-from dynaconf import Dynaconf
 from core.config import Config, ConfigOpts
 from core.constants import NeuronType
 
@@ -66,50 +65,6 @@ class ValidatorConfig(Config):
             default=self.settings.get(
                 "pg_database", "postgresql://user:password@localhost/dbname"
             ),  # type: ignore
-        )
-
-        # duckdb database
-        self._parser.add_argument(
-            "--duckdb-path",
-            type=str,
-            help="Path to DuckDB database file",
-            default=self.settings.get("duckdb_path", "evaluation_data.duckdb"),
-        )
-
-        # parent/child validator configuration
-        self._parser.add_argument(
-            "--is-parent",
-            action="store_true",
-            help="Run as parent validator that distributes jobs to children",
-            default=self.settings.get("is_parent", False),
-        )
-
-        self._parser.add_argument(
-            "--parent-host",
-            type=str,
-            help="Parent validator hostname (for child validators)",
-            default=self.settings.get("parent_host", "localhost"),
-        )
-
-        self._parser.add_argument(
-            "--parent-port",
-            type=int,
-            help="Parent validator WebSocket port (for child validators)",
-            default=self.settings.get("parent_port", 8765),
-        )
-
-        self._parser.add_argument(
-            "--broadcast-host",
-            type=str,
-            help="Host to bind WebSocket server (for parent validators)",
-            default=self.settings.get("broadcast_host", "localhost"),
-        )
-
-        self._parser.add_argument(
-            "--broadcast-port",
-            type=int,
-            help="Port to bind WebSocket server (for parent validators)",
-            default=self.settings.get("broadcast_port", 8765),
         )
 
         self._parser.add_argument(
