@@ -2,12 +2,14 @@
 SQLAlchemy models for Kinitro Backend database.
 """
 
+from datetime import datetime
+from typing import Optional
+
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
-    Column,
     DateTime,
     Float,
     ForeignKey,
@@ -17,10 +19,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
+
 
 # Type aliases for consistency
 SnowflakeId = BigInteger
@@ -30,10 +35,10 @@ SS58Address = String(48)
 class TimestampMixin:
     """Mixin for created/updated timestamps."""
 
-    created_at = Column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )
-    updated_at = Column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
@@ -46,22 +51,28 @@ class Competition(TimestampMixin, Base):
 
     __tablename__ = "competitions"
 
-    id = Column(String(64), primary_key=True)
-    name = Column(String(256), nullable=False, unique=True)
-    description = Column(Text, nullable=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Store benchmarks as JSON array: ["benchmark_a", "benchmark_b"]
-    benchmarks = Column(JSON, nullable=False)
+    benchmarks: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     # Points allocated to this competition for reward distribution
-    points = Column(Integer, nullable=False)
+    points: Mapped[int] = mapped_column(nullable=False)
 
     # Competition status
-    active = Column(Boolean, nullable=False, server_default="true", index=True)
+    active: Mapped[bool] = mapped_column(
+        nullable=False, server_default="true", index=True
+    )
 
     # Start and end times for the competition
-    start_time = Column(DateTime(timezone=True), nullable=True)
-    end_time = Column(DateTime(timezone=True), nullable=True)
+    start_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    end_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Relationships
     submissions = relationship(
@@ -89,24 +100,26 @@ class MinerSubmission(TimestampMixin, Base):
 
     __tablename__ = "miner_submissions"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
 
     # Miner and competition info
-    miner_hotkey = Column(SS58Address, nullable=False, index=True)
-    competition_id = Column(
+    miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
+    competition_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("competitions.id"), nullable=False, index=True
     )
 
     # Submission details from chain commitment
-    hf_repo_id = Column(String(256), nullable=False)
-    version = Column(String(32), nullable=False)
-    commitment_block = Column(BigInteger, nullable=False, index=True)
-    commitment_hash = Column(
+    hf_repo_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    commitment_block: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, index=True
+    )
+    commitment_hash: Mapped[Optional[str]] = mapped_column(
         String(128), nullable=True
     )  # Optional hash of the commitment
 
     # Submission timestamp (when we processed it)
-    submission_time = Column(
+    submission_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -137,28 +150,36 @@ class BackendEvaluationJob(TimestampMixin, Base):
 
     __tablename__ = "backend_evaluation_jobs"
 
-    id = Column(SnowflakeId, primary_key=True)
-    job_id = Column(
+    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
+    job_id: Mapped[str] = mapped_column(
         String(128), nullable=False, unique=True, index=True
     )  # External job ID for validators
 
     # Link to submission and competition
-    submission_id = Column(
+    submission_id: Mapped[SnowflakeId] = mapped_column(
         SnowflakeId, ForeignKey("miner_submissions.id"), nullable=False, index=True
     )
-    competition_id = Column(
+    competition_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("competitions.id"), nullable=False, index=True
     )
 
     # Job details
-    miner_hotkey = Column(SS58Address, nullable=False, index=True)
-    hf_repo_id = Column(String(256), nullable=False)
-    benchmarks = Column(JSON, nullable=False)  # List of benchmarks to run
+    miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
+    hf_repo_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    benchmarks: Mapped[list[dict]] = mapped_column(
+        JSON, nullable=False
+    )  # List of benchmarks to run
 
     # Job status tracking
-    broadcast_time = Column(DateTime(timezone=True), nullable=True)
-    validators_sent = Column(Integer, nullable=False, server_default="0")
-    validators_completed = Column(Integer, nullable=False, server_default="0")
+    broadcast_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    validators_sent: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    validators_completed: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
 
     # Relationships
     submission = relationship("MinerSubmission", back_populates="evaluation_jobs")
@@ -186,36 +207,38 @@ class BackendEvaluationResult(TimestampMixin, Base):
 
     __tablename__ = "backend_evaluation_results"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
 
     # Job and validator info
-    job_id = Column(String(128), nullable=False, index=True)
-    backend_job_id = Column(
+    job_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    backend_job_id: Mapped[SnowflakeId] = mapped_column(
         SnowflakeId,
         ForeignKey("backend_evaluation_jobs.id"),
         nullable=False,
         index=True,
     )
-    validator_hotkey = Column(SS58Address, nullable=False, index=True)
+    validator_hotkey = mapped_column(SS58Address, nullable=False, index=True)
 
     # Result details
-    miner_hotkey = Column(SS58Address, nullable=False, index=True)
-    competition_id = Column(String(64), nullable=False, index=True)
-    benchmark = Column(String(128), nullable=False, index=True)
+    miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
+    competition_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    benchmark: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
 
     # Scores and metrics
-    score = Column(Float, nullable=False)
-    success_rate = Column(Float, nullable=True)
-    avg_reward = Column(Float, nullable=True)
-    total_episodes = Column(Integer, nullable=True)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    success_rate: Mapped[float] = mapped_column(Float, nullable=True)
+    avg_reward: Mapped[float] = mapped_column(Float, nullable=True)
+    total_episodes: Mapped[int] = mapped_column(Integer, nullable=True)
 
     # Additional data
-    logs = Column(Text, nullable=True)
-    error = Column(Text, nullable=True)
-    extra_data = Column(JSON, nullable=True)  # Additional metrics/data
+    logs: Mapped[str] = mapped_column(Text, nullable=True)
+    error: Mapped[str] = mapped_column(Text, nullable=True)
+    extra_data: Mapped[dict] = mapped_column(
+        JSON, nullable=True
+    )  # Additional metrics/data
 
     # Timing
-    result_time = Column(
+    result_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -249,31 +272,41 @@ class ValidatorConnection(TimestampMixin, Base):
 
     __tablename__ = "validator_connections"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
 
-    validator_hotkey = Column(SS58Address, nullable=False, unique=True, index=True)
-    connection_id = Column(
+    validator_hotkey: Mapped[str] = mapped_column(
+        SS58Address, nullable=False, unique=True, index=True
+    )
+    connection_id: Mapped[str] = mapped_column(
         String(128), nullable=False, index=True
     )  # IP:port or other identifier
 
     # Connection tracking
-    first_connected_at = Column(
+    first_connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    last_connected_at = Column(
+    last_connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    last_heartbeat = Column(
+    last_heartbeat: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
     # Statistics
-    total_jobs_sent = Column(Integer, nullable=False, server_default="0")
-    total_results_received = Column(Integer, nullable=False, server_default="0")
-    total_errors = Column(Integer, nullable=False, server_default="0")
+    total_jobs_sent: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    total_results_received: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    total_errors: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
 
     # Current status
-    is_connected = Column(Boolean, nullable=False, server_default="true", index=True)
+    is_connected: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true", index=True
+    )
 
     __table_args__ = (
         CheckConstraint("total_jobs_sent >= 0", name="ck_jobs_sent_non_negative"),
@@ -291,15 +324,19 @@ class BackendState(TimestampMixin, Base):
 
     __tablename__ = "backend_state"
 
-    id = Column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
     # Chain monitoring state
-    last_seen_block = Column(BigInteger, nullable=False, server_default="0")
-    last_chain_scan = Column(DateTime(timezone=True), nullable=True)
+    last_seen_block: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    last_chain_scan: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Service info
-    service_version = Column(String(32), nullable=True)
-    service_start_time = Column(
+    service_version: Mapped[str] = mapped_column(String(32), nullable=True)
+    service_start_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

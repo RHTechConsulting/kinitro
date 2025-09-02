@@ -44,7 +44,7 @@ class WebSocketValidator(Neuron):
         self.heartbeat_interval = config.settings.get("heartbeat_interval", 30)
 
         # Connection state
-        self.websocket: Optional[websockets.WebSocketServerProtocol] = None
+        self.websocket: Optional[websockets.ServerConnection] = None
         self.connected = False
         self._running = False
         self._heartbeat_task = None

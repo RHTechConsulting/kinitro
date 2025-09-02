@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-from dynaconf import Dynaconf
 from core.config import Config, ConfigOpts
 from core.constants import NeuronType
 

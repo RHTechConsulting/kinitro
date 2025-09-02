@@ -11,10 +11,10 @@ This provides REST API endpoints and WebSocket connections for:
 import asyncio
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,9 +22,15 @@ from fiber.chain.interface import get_substrate
 from fiber.chain.metagraph import Metagraph
 from pydantic import BaseModel, Field
 from snowflake import SnowflakeGenerator
+
+# Update state
 from sqlalchemy import and_, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from core.chain import query_commitments_from_substrate
 from core.log import get_logger
@@ -181,8 +187,11 @@ class BackendService:
         self.min_stake_threshold = config.settings.get("min_stake_threshold", 0.0)
 
         # Chain connection objects
-        self.substrate = None
-        self.metagraph = None
+        # Using Any since fiber's SubstrateInterface is from async_substrate_interface
+        self.substrate: Optional[Any] = (
+            None  # async_substrate_interface.sync_substrate.SubstrateInterface
+        )
+        self.metagraph: Optional[Metagraph] = None
 
         # WebSocket connections
         self.active_connections: Dict[str, WebSocket] = {}
@@ -197,21 +206,22 @@ class BackendService:
         self.id_generator = SnowflakeGenerator(42)
 
         # Database
-        self.engine = None
-        self.async_session = None
+        self.engine: Optional[AsyncEngine] = None
+        # TODO: is there a better way to perform startup instead of what we're doing with startup()?
+        self.async_session: Optional[async_sessionmaker[AsyncSession]] = None
 
         # Thread pool for blocking operations
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
 
-    async def startup(self):
+    async def startup(self) -> None:
         """Initialize the backend service."""
         logger.info("Starting Kinitro Backend Service")
 
+        # Initialize database first
+        await self._init_database()
+
         # Initialize chain connection
         await self._init_chain()
-
-        # Initialize database
-        await self._init_database()
 
         # Load backend state
         await self._load_backend_state()
@@ -225,7 +235,7 @@ class BackendService:
 
         logger.info("Kinitro Backend Service started successfully")
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """Shutdown the backend service."""
         logger.info("Shutting down Kinitro Backend Service")
 
@@ -259,7 +269,7 @@ class BackendService:
 
         logger.info("Backend Service shut down")
 
-    async def _init_chain(self):
+    async def _init_chain(self) -> None:
         """Initialize blockchain connection."""
         try:
             logger.info("Initializing blockchain connection...")
@@ -279,20 +289,23 @@ class BackendService:
             logger.error(f"Failed to initialize blockchain connection: {e}")
             # Don't raise - allow backend to run without chain connection for testing
 
-    async def _init_database(self):
+    async def _init_database(self) -> None:
         """Initialize database connection."""
         self.engine = create_async_engine(
             self.db_url, echo=False, pool_pre_ping=True, pool_size=20, max_overflow=0
         )
 
-        self.async_session = sessionmaker(
+        self.async_session = async_sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False
         )
 
         logger.info("Database connection initialized")
 
-    async def _load_backend_state(self):
+    async def _load_backend_state(self) -> None:
         """Load or initialize backend state."""
+        if not self.async_session:
+            logger.error("Database not initialized")
+            return
         async with self.async_session() as session:
             result = await session.execute(
                 select(BackendState).where(BackendState.id == 1)
@@ -311,11 +324,11 @@ class BackendService:
                     f"Loaded backend state: last_seen_block={state.last_seen_block}"
                 )
 
-    async def _monitor_chain(self):
+    async def _monitor_chain(self) -> None:
         """Background task to monitor blockchain for commitments."""
         while self._running:
             try:
-                if self.substrate and self.metagraph:
+                if self.substrate and self.metagraph and self.async_session:
                     await self._sync_metagraph()
 
                     async with self.async_session() as session:
@@ -370,40 +383,44 @@ class BackendService:
                 logger.error(f"Error monitoring chain: {e}")
                 await asyncio.sleep(self.chain_sync_interval)
 
-    async def _monitor_validator_heartbeats(self):
+    async def _monitor_validator_heartbeats(self) -> None:
         """Monitor validator heartbeats and cleanup stale connections."""
         while self._running:
             try:
                 current_time = datetime.now(timezone.utc)
                 timeout_threshold = current_time - timedelta(minutes=2)
 
-                async with self.async_session() as session:
-                    # Find stale validators
-                    result = await session.execute(
-                        select(ValidatorConnection).where(
-                            and_(
-                                ValidatorConnection.is_connected,
-                                ValidatorConnection.last_heartbeat < timeout_threshold,
+                if self.async_session:
+                    async with self.async_session() as session:
+                        # Find stale validators
+                        result = await session.execute(
+                            select(ValidatorConnection).where(
+                                and_(
+                                    ValidatorConnection.is_connected,
+                                    ValidatorConnection.last_heartbeat
+                                    < timeout_threshold,
+                                )
                             )
                         )
-                    )
 
-                    for validator in result.scalars():
-                        logger.warning(
-                            f"Marking validator as disconnected: {validator.validator_hotkey}"
-                        )
-                        validator.is_connected = False
+                        for validator in result.scalars():
+                            logger.warning(
+                                f"Marking validator as disconnected: {validator.validator_hotkey}"
+                            )
+                            validator.is_connected = False
 
-                        # Close WebSocket if exists
-                        for conn_id, hotkey in list(self.validator_connections.items()):
-                            if hotkey == validator.validator_hotkey:
-                                if conn_id in self.active_connections:
-                                    await self.active_connections[conn_id].close()
-                                    del self.active_connections[conn_id]
-                                del self.validator_connections[conn_id]
-                                break
+                            # Close WebSocket if exists
+                            for conn_id, hotkey in list(
+                                self.validator_connections.items()
+                            ):
+                                if hotkey == validator.validator_hotkey:
+                                    if conn_id in self.active_connections:
+                                        await self.active_connections[conn_id].close()
+                                        del self.active_connections[conn_id]
+                                    del self.validator_connections[conn_id]
+                                    break
 
-                    await session.commit()
+                        await session.commit()
 
                 await asyncio.sleep(30)
 
@@ -425,7 +442,7 @@ class BackendService:
             logger.error(f"Failed to get latest block: {e}")
             return 0
 
-    async def _sync_metagraph(self):
+    async def _sync_metagraph(self) -> None:
         """Sync metagraph nodes."""
         try:
             if self.metagraph:
@@ -496,6 +513,9 @@ class BackendService:
 
             competition = active_competitions[competition_id]
 
+            if not self.async_session:
+                logger.error("Database not initialized")
+                return
             async with self.async_session() as session:
                 # Check if submission exists
                 existing = await session.execute(
@@ -585,6 +605,9 @@ class BackendService:
                 del self.validator_connections[conn_id]
 
         # Update job stats
+        if not self.async_session:
+            logger.error("Database not initialized")
+            return
         async with self.async_session() as session:
             job_result = await session.execute(
                 select(BackendEvaluationJob).where(BackendEvaluationJob.id == job.id)
@@ -634,7 +657,7 @@ app.add_middleware(
 
 
 @app.get("/")
-async def root():
+async def root() -> dict:
     """Root endpoint."""
     return {
         "service": "Kinitro Backend",
@@ -645,7 +668,7 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict:
     """Health check endpoint."""
     return {
         "status": "healthy",
@@ -656,8 +679,10 @@ async def health_check():
 
 
 @app.get("/stats", response_model=BackendStats)
-async def get_stats():
+async def get_stats() -> BackendStats:
     """Get comprehensive backend statistics."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         # Get competitions
         comp_result = await session.execute(select(Competition))
@@ -714,6 +739,8 @@ async def get_stats():
 @app.post("/competitions", response_model=CompetitionResponse)
 async def create_competition(competition: CompetitionCreate):
     """Create a new competition."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         db_competition = Competition(
             id=str(uuid.uuid4()),
@@ -743,6 +770,8 @@ async def list_competitions(
     limit: int = Query(100, ge=1, le=1000),
 ):
     """List all competitions."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         query = select(Competition)
         if active_only:
@@ -758,6 +787,8 @@ async def list_competitions(
 @app.get("/competitions/{competition_id}", response_model=CompetitionResponse)
 async def get_competition(competition_id: str):
     """Get a specific competition by ID."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(Competition).where(Competition.id == competition_id)
@@ -773,6 +804,8 @@ async def get_competition(competition_id: str):
 @app.patch("/competitions/{competition_id}/activate")
 async def activate_competition(competition_id: str):
     """Activate a competition."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(Competition).where(Competition.id == competition_id)
@@ -791,6 +824,8 @@ async def activate_competition(competition_id: str):
 @app.patch("/competitions/{competition_id}/deactivate")
 async def deactivate_competition(competition_id: str):
     """Deactivate a competition."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(Competition).where(Competition.id == competition_id)
@@ -809,6 +844,8 @@ async def deactivate_competition(competition_id: str):
 @app.delete("/competitions/{competition_id}")
 async def delete_competition(competition_id: str):
     """Delete a competition (soft delete by deactivating)."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(Competition).where(Competition.id == competition_id)
@@ -834,6 +871,8 @@ async def list_validators(
     limit: int = Query(100, ge=1, le=1000),
 ):
     """List all validators."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         query = select(ValidatorConnection)
         if connected_only:
@@ -849,6 +888,8 @@ async def list_validators(
 @app.get("/validators/{validator_hotkey}", response_model=ValidatorInfo)
 async def get_validator(validator_hotkey: str):
     """Get a specific validator by hotkey."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(ValidatorConnection).where(
@@ -872,6 +913,8 @@ async def list_submissions(
     limit: int = Query(100, ge=1, le=1000),
 ):
     """List miner submissions."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         query = select(MinerSubmission)
 
@@ -892,6 +935,8 @@ async def list_submissions(
 @app.get("/submissions/{submission_id}", response_model=MinerSubmissionResponse)
 async def get_submission(submission_id: int):
     """Get a specific submission by ID."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(MinerSubmission).where(MinerSubmission.id == submission_id)
@@ -914,6 +959,8 @@ async def list_jobs(
     limit: int = Query(100, ge=1, le=1000),
 ):
     """List evaluation jobs."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         query = select(BackendEvaluationJob)
 
@@ -939,6 +986,8 @@ async def list_jobs(
 @app.get("/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str):
     """Get a specific job by ID."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(BackendEvaluationJob).where(BackendEvaluationJob.job_id == job_id)
@@ -965,6 +1014,8 @@ async def list_results(
     limit: int = Query(100, ge=1, le=1000),
 ):
     """List evaluation results."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         query = select(BackendEvaluationResult)
 
@@ -995,6 +1046,8 @@ async def list_results(
 @app.get("/results/{result_id}", response_model=EvaluationResultResponse)
 async def get_result(result_id: int):
     """Get a specific result by ID."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
             select(BackendEvaluationResult).where(
@@ -1018,7 +1071,8 @@ async def get_result(result_id: int):
 async def validator_websocket(websocket: WebSocket):
     """WebSocket endpoint for validator connections."""
     await websocket.accept()
-    connection_id = f"{websocket.client.host}:{websocket.client.port}"
+    # generate a connection id
+    connection_id = uuid.uuid4().hex
 
     try:
         # Wait for registration
@@ -1037,6 +1091,10 @@ async def validator_websocket(websocket: WebSocket):
             return
 
         # Register validator
+        if not backend_service.async_session:
+            await websocket.send_text(json.dumps({"error": "Database not initialized"}))
+            await websocket.close()
+            return
         async with backend_service.async_session() as session:
             result = await session.execute(
                 select(ValidatorConnection).where(
@@ -1086,6 +1144,9 @@ async def validator_websocket(websocket: WebSocket):
 
             if message_type == "heartbeat":
                 # Update heartbeat
+                if not backend_service.async_session:
+                    logger.error("Database not initialized")
+                    continue
                 async with backend_service.async_session() as session:
                     result = await session.execute(
                         select(ValidatorConnection).where(
@@ -1111,6 +1172,9 @@ async def validator_websocket(websocket: WebSocket):
                 # Handle evaluation result
                 result_msg = EvalResultMessage(**message)
 
+                if not backend_service.async_session:
+                    logger.error("Database not initialized")
+                    continue
                 async with backend_service.async_session() as session:
                     # Find job
                     job_result = await session.execute(
@@ -1186,16 +1250,17 @@ async def validator_websocket(websocket: WebSocket):
             del backend_service.validator_connections[connection_id]
 
             # Update database
-            async with backend_service.async_session() as session:
-                result = await session.execute(
-                    select(ValidatorConnection).where(
-                        ValidatorConnection.validator_hotkey == hotkey
+            if backend_service.async_session:
+                async with backend_service.async_session() as session:
+                    result = await session.execute(
+                        select(ValidatorConnection).where(
+                            ValidatorConnection.validator_hotkey == hotkey
+                        )
                     )
-                )
-                validator_conn = result.scalar_one_or_none()
-                if validator_conn:
-                    validator_conn.is_connected = False
-                    await session.commit()
+                    validator_conn = result.scalar_one_or_none()
+                    if validator_conn:
+                        validator_conn.is_connected = False
+                        await session.commit()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ communication between the Kinitro Backend and Validators.
 """
 
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,7 +19,7 @@ class EvalJobMessage(BaseModel):
     competition_id: str
     miner_hotkey: str
     hf_repo_id: str
-    benchmarks: List[str]
+    benchmarks: list[dict]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -31,7 +31,7 @@ class EvalResultMessage(BaseModel):
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
-    benchmark: str
+    benchmark: dict
     score: float
     success_rate: Optional[float] = None
     avg_reward: Optional[float] = None
