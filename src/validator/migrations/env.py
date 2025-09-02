@@ -34,7 +34,7 @@ target_metadata = Base.metadata
 def get_database_url():
     """Get database URL from configuration or environment."""
     # First try environment variable
-    db_url = os.getenv("VALIDATOR_DATABASE_URL")
+    db_url = os.getenv("DATABASE_URL")
     if db_url:
         return db_url
 

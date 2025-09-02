@@ -190,6 +190,7 @@ class WebSocketValidator(Neuron):
         except Exception as e:
             logger.error(f"Message loop error: {e}")
 
+    # TODO: implement proper eval job handling
     async def _handle_eval_job(self, job: EvalJobMessage):
         """Handle evaluation job from backend."""
         logger.info(

@@ -39,7 +39,7 @@ target_metadata = Base.metadata
 def get_database_url():
     """Get database URL from environment variable or config."""
     # First try to get from environment variable
-    db_url = os.environ.get("KINITRO_BACKEND_DATABASE_URL")
+    db_url = os.environ.get("DATABASE_URL")
 
     if db_url:
         return db_url
