@@ -28,7 +28,7 @@ class Base(DeclarativeBase):
 
 
 # Type aliases for consistency
-SnowflakeId = BigInteger
+SnowflakeColumn = BigInteger  # SQLAlchemy column type for snowflake IDs
 SS58Address = String(48)
 
 
@@ -100,7 +100,7 @@ class MinerSubmission(TimestampMixin, Base):
 
     __tablename__ = "miner_submissions"
 
-    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
+    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
 
     # Miner and competition info
     miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
@@ -150,14 +150,10 @@ class BackendEvaluationJob(TimestampMixin, Base):
 
     __tablename__ = "backend_evaluation_jobs"
 
-    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
-    job_id: Mapped[str] = mapped_column(
-        String(128), nullable=False, unique=True, index=True
-    )  # External job ID for validators
-
+    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
     # Link to submission and competition
-    submission_id: Mapped[SnowflakeId] = mapped_column(
-        SnowflakeId, ForeignKey("miner_submissions.id"), nullable=False, index=True
+    submission_id: Mapped[SnowflakeColumn] = mapped_column(
+        SnowflakeColumn, ForeignKey("miner_submissions.id"), nullable=False, index=True
     )
     competition_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("competitions.id"), nullable=False, index=True
@@ -207,12 +203,11 @@ class BackendEvaluationResult(TimestampMixin, Base):
 
     __tablename__ = "backend_evaluation_results"
 
-    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
+    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
 
     # Job and validator info
-    job_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    backend_job_id: Mapped[SnowflakeId] = mapped_column(
-        SnowflakeId,
+    job_id: Mapped[SnowflakeColumn] = mapped_column(
+        SnowflakeColumn,
         ForeignKey("backend_evaluation_jobs.id"),
         nullable=False,
         index=True,
@@ -272,7 +267,7 @@ class ValidatorConnection(TimestampMixin, Base):
 
     __tablename__ = "validator_connections"
 
-    id: Mapped[SnowflakeId] = mapped_column(SnowflakeId, primary_key=True)
+    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
 
     validator_hotkey: Mapped[str] = mapped_column(
         SS58Address, nullable=False, unique=True, index=True

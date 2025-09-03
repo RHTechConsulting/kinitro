@@ -19,7 +19,7 @@ from sqlalchemy.sql import func
 
 Base = declarative_base()
 
-SnowflakeId = BigInteger
+# TODO: there's two definitions of this around the codebase 💀
 SS58Address = String(48)
 
 
@@ -52,7 +52,7 @@ class TimestampMixin:
 class SubmissionMixin:
     """Mixin for submission/provenance metadata."""
 
-    submission_id = Column(SnowflakeId, nullable=False, index=True)
+    submission_id = Column(BigInteger, nullable=False, index=True)
     miner_hotkey = Column(SS58Address, nullable=False, index=True)
     hf_repo_id = Column(String(256), nullable=False, index=True)
     env_provider = Column(String(64), nullable=False)
@@ -62,7 +62,7 @@ class SubmissionMixin:
 class EvaluationJob(SubmissionMixin, TimestampMixin, Base):
     __tablename__ = "evaluation_jobs"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
 
     status = Column(
         SAEnum(EvaluationStatus, name="evaluation_status", native_enum=False),
@@ -133,9 +133,9 @@ class EvaluationJob(SubmissionMixin, TimestampMixin, Base):
 class EvaluationResult(TimestampMixin, Base):
     __tablename__ = "evaluation_results"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
 
-    evaluation_id = Column(SnowflakeId, nullable=False, unique=True, index=True)
+    evaluation_id = Column(BigInteger, nullable=False, unique=True, index=True)
 
     total_episodes = Column(Integer, nullable=False)
     successful_episodes = Column(Integer, nullable=False, server_default="0")
@@ -193,7 +193,7 @@ class EvaluationResult(TimestampMixin, Base):
 class ValidatorState(TimestampMixin, Base):
     __tablename__ = "validator_state"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     validator_hotkey = Column(SS58Address, nullable=False, unique=True, index=True)
     last_seen_block = Column(BigInteger, nullable=False, server_default="0")
 
@@ -206,7 +206,7 @@ class ValidatorState(TimestampMixin, Base):
 class CommitmentFingerprint(TimestampMixin, Base):
     __tablename__ = "commitment_fingerprints"
 
-    id = Column(SnowflakeId, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     miner_hotkey = Column(SS58Address, nullable=False, unique=True, index=True)
     fingerprint = Column(String(512), nullable=False)
 

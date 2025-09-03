@@ -10,12 +10,14 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from core.db.models import SnowflakeId
+
 
 class EvalJobMessage(BaseModel):
     """Message for broadcasting evaluation jobs from backend to validators."""
 
     message_type: str = "eval_job"
-    job_id: str
+    job_id: SnowflakeId
     competition_id: str
     miner_hotkey: str
     hf_repo_id: str
@@ -27,7 +29,7 @@ class EvalResultMessage(BaseModel):
     """Message for sending evaluation results from validators to backend."""
 
     message_type: str = "eval_result"
-    job_id: str
+    job_id: SnowflakeId
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -77,7 +79,7 @@ class ResultAckMessage(BaseModel):
     """Acknowledgment message for result submission."""
 
     message_type: str = "result_ack"
-    job_id: str
+    job_id: SnowflakeId
     status: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

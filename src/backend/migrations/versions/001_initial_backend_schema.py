@@ -120,7 +120,6 @@ def upgrade() -> None:
     op.create_table(
         "backend_evaluation_jobs",
         sa.Column("id", sa.BigInteger(), nullable=False),
-        sa.Column("job_id", sa.String(length=128), nullable=False),
         sa.Column("submission_id", sa.BigInteger(), nullable=False),
         sa.Column("competition_id", sa.String(length=64), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
@@ -162,12 +161,11 @@ def upgrade() -> None:
             ["miner_submissions.id"],
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("job_id"),
     )
 
     # Create indexes for backend_evaluation_jobs
     op.create_index(
-        "ix_backend_evaluation_jobs_job_id", "backend_evaluation_jobs", ["job_id"]
+        "ix_backend_evaluation_jobs_job_id", "backend_evaluation_jobs", ["id"]
     )
     op.create_index(
         "ix_backend_evaluation_jobs_submission_id",
@@ -192,7 +190,6 @@ def upgrade() -> None:
     op.create_table(
         "backend_evaluation_results",
         sa.Column("id", sa.BigInteger(), nullable=False),
-        sa.Column("job_id", sa.String(length=128), nullable=False),
         sa.Column("backend_job_id", sa.BigInteger(), nullable=False),
         sa.Column("validator_hotkey", sa.String(length=48), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
@@ -237,13 +234,16 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
-            "job_id", "validator_hotkey", "benchmark", name="uq_job_validator_benchmark"
+            "backend_job_id",
+            "validator_hotkey",
+            "benchmark",
+            name="uq_job_validator_benchmark",
         ),
     )
 
     # Create indexes for backend_evaluation_results
     op.create_index(
-        "ix_backend_evaluation_results_job_id", "backend_evaluation_results", ["job_id"]
+        "ix_backend_evaluation_results_job_id", "backend_evaluation_results", ["id"]
     )
     op.create_index(
         "ix_backend_evaluation_results_backend_job_id",

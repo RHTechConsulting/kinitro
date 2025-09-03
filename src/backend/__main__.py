@@ -546,10 +546,9 @@ class BackendService:
                 await session.flush()
 
                 # Create job
-                job_id = str(uuid.uuid4())
+                job_id = next(self.id_generator)
                 eval_job = BackendEvaluationJob(
-                    id=next(self.id_generator),
-                    job_id=job_id,
+                    id=job_id,
                     submission_id=submission.id,
                     competition_id=competition_id,
                     miner_hotkey=submission.miner_hotkey,
@@ -578,7 +577,8 @@ class BackendService:
             return
 
         job_msg = EvalJobMessage(
-            job_id=job.job_id,
+            # TODO: yuck.
+            job_id=int(str(job.id)),
             competition_id=job.competition_id,
             miner_hotkey=job.miner_hotkey,
             hf_repo_id=job.hf_repo_id,
@@ -617,7 +617,7 @@ class BackendService:
             db_job.validators_sent = broadcast_count
             await session.commit()
 
-        logger.info(f"Broadcasted job {job.job_id} to {broadcast_count} validators")
+        logger.info(f"Broadcasted job {job.id} to {broadcast_count} validators")
 
 
 # Create backend service instance
@@ -984,13 +984,13 @@ async def list_jobs(
 
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str):
+async def get_job(job_id: int):
     """Get a specific job by ID."""
     if not backend_service.async_session:
         raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         result = await session.execute(
-            select(BackendEvaluationJob).where(BackendEvaluationJob.job_id == job_id)
+            select(BackendEvaluationJob).where(BackendEvaluationJob.id == job_id)
         )
         job = result.scalar_one_or_none()
 
@@ -1179,7 +1179,7 @@ async def validator_websocket(websocket: WebSocket):
                     # Find job
                     job_result = await session.execute(
                         select(BackendEvaluationJob).where(
-                            BackendEvaluationJob.job_id == result_msg.job_id
+                            BackendEvaluationJob.id == result_msg.job_id
                         )
                     )
                     backend_job = job_result.scalar_one_or_none()

@@ -7,16 +7,17 @@ via WebSocket and receives evaluation jobs from there
 
 import asyncio
 import json
-import random
 from typing import Dict, Optional
 
+import asyncpg
 import websockets
+from pgqueuer import Queries
+from pgqueuer.db import AsyncpgDriver
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from core.log import get_logger
 from core.messages import (
     EvalJobMessage,
-    EvalResultMessage,
     HeartbeatMessage,
     ValidatorRegisterMessage,
 )
@@ -49,8 +50,19 @@ class WebSocketValidator(Neuron):
         self._running = False
         self._heartbeat_task = None
 
+        # Database and pgqueue
+        self.database_url = config.settings.get(
+            "pg_database", "postgresql://myuser:mypassword@localhost/validatordb"
+        )
+
+        if self.database_url is None:
+            raise Exception("Database URL not provided")
+
+        self.q: Optional[Queries] = None
+
         # Job tracking
-        self.active_jobs: Dict[str, EvalJobMessage] = {}
+        # TODO: remove?
+        # self.active_jobs: Dict[str, EvalJobMessage] = {}
 
         logger.info(f"WebSocket Validator initialized for hotkey: {self.hotkey}")
 
@@ -198,63 +210,15 @@ class WebSocketValidator(Neuron):
         )
 
         # Track active job
-        self.active_jobs[job.job_id] = job
+        # self.active_jobs[job.job_id] = job
 
-        try:
-            # Simulate evaluation processing time
-            await asyncio.sleep(random.uniform(1, 3))
-
-            # Send dummy results back to backend for each benchmark
-            for benchmark in job.benchmarks:
-                # Generate dummy evaluation data
-                dummy_score = random.uniform(0.1, 1.0)
-                dummy_success_rate = random.uniform(0.5, 1.0)
-                dummy_avg_reward = random.uniform(10, 100)
-                dummy_episodes = random.randint(50, 200)
-
-                result_msg = EvalResultMessage(
-                    job_id=job.job_id,
-                    validator_hotkey=self.hotkey,
-                    miner_hotkey=job.miner_hotkey,
-                    competition_id=job.competition_id,
-                    benchmark=benchmark,
-                    score=dummy_score,
-                    success_rate=dummy_success_rate,
-                    avg_reward=dummy_avg_reward,
-                    total_episodes=dummy_episodes,
-                    logs=f"Dummy evaluation completed for {benchmark}",
-                    extra_data={
-                        "processing_time": random.uniform(1, 3),
-                        "validator_version": "1.0.0-dummy",
-                    },
-                )
-
-                await self._send_message(result_msg.model_dump())
-                logger.info(
-                    f"Sent dummy result for job {job.job_id}, benchmark {benchmark} (score: {dummy_score:.3f})"
-                )
-
-        except Exception as e:
-            logger.error(f"Failed to process job {job.job_id}: {e}")
-
-            # Send error result for each benchmark
-            for benchmark in job.benchmarks:
-                error_msg = EvalResultMessage(
-                    job_id=job.job_id,
-                    validator_hotkey=self.hotkey,
-                    miner_hotkey=job.miner_hotkey,
-                    competition_id=job.competition_id,
-                    benchmark=benchmark,
-                    score=0.0,
-                    error=str(e),
-                )
-
-                await self._send_message(error_msg.model_dump())
-
-        finally:
-            # Remove from active jobs
-            if job.job_id in self.active_jobs:
-                del self.active_jobs[job.job_id]
+        # Queue the job with pgqueuer to the database
+        job_bytes = job.model_dump_json().encode("utf-8")
+        # Connect to the postgres database
+        conn = await asyncpg.connect(dsn=self.database_url)
+        driver = AsyncpgDriver(conn)
+        q = Queries(driver)
+        await q.enqueue(["add_job"], [job_bytes], [0])
 
     async def _send_message(self, message: dict):
         """Send message to backend."""
@@ -267,12 +231,3 @@ class WebSocketValidator(Neuron):
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
             raise
-
-    async def get_status(self) -> dict:
-        """Get validator status information."""
-        return {
-            "hotkey": self.hotkey,
-            "connected": self.connected,
-            "backend_url": self.backend_url,
-            "active_jobs": len(self.active_jobs),
-        }

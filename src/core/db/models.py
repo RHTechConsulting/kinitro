@@ -47,6 +47,7 @@ class StatusMixin(BaseModel):
 class EvaluationJobBase(BaseModel):
     """Base model for evaluation job data."""
 
+    job_id: SnowflakeId
     status: EvaluationStatus = EvaluationStatus.QUEUED
     container_id: Optional[str] = Field(None, max_length=128)
     ray_worker_id: Optional[str] = Field(None, max_length=128)
@@ -186,6 +187,7 @@ class ValidatorState(ValidatorStateBase, TimestampMixin):
     model_config = ConfigDict(from_attributes=True)
 
 
+# TODO: get rid of commitment fingerprinting - we don't use it anymore
 class CommitmentFingerprintBase(BaseModel):
     """Base model for commitment fingerprints."""
 
