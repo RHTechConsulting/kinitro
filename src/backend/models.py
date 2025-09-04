@@ -162,9 +162,8 @@ class BackendEvaluationJob(TimestampMixin, Base):
     # Job details
     miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
     hf_repo_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    benchmarks: Mapped[list[dict]] = mapped_column(
-        JSON, nullable=False
-    )  # List of benchmarks to run
+    env_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    env_name: Mapped[str] = mapped_column(String(128), nullable=False)
 
     # Job status tracking
     broadcast_time: Mapped[datetime] = mapped_column(

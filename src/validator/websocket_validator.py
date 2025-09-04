@@ -7,7 +7,7 @@ via WebSocket and receives evaluation jobs from there
 
 import asyncio
 import json
-from typing import Dict, Optional
+from typing import Optional
 
 import asyncpg
 import websockets
@@ -162,8 +162,9 @@ class WebSocketValidator(Neuron):
         try:
             while self.connected and not self._heartbeat_task.cancelled():
                 # Send heartbeat with queue size
-                queue_size = len(self.active_jobs)
-                heartbeat = HeartbeatMessage(queue_size=queue_size)
+                # queue_size = len(self.active_jobs)
+                # TODO: 6969 is a placeholder
+                heartbeat = HeartbeatMessage(queue_size=6969)
                 await self._send_message(heartbeat.model_dump())
 
                 # Wait for heartbeat interval
@@ -213,12 +214,14 @@ class WebSocketValidator(Neuron):
         # self.active_jobs[job.job_id] = job
 
         # Queue the job with pgqueuer to the database
-        job_bytes = job.model_dump_json().encode("utf-8")
+        job_bytes = job.to_bytes()
+        logger.info(f"Queueing job {job.job_id} to database")
         # Connect to the postgres database
         conn = await asyncpg.connect(dsn=self.database_url)
         driver = AsyncpgDriver(conn)
         q = Queries(driver)
         await q.enqueue(["add_job"], [job_bytes], [0])
+        logger.info(f"Job {job.job_id} queued successfully")
 
     async def _send_message(self, message: dict):
         """Send message to backend."""

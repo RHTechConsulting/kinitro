@@ -128,7 +128,8 @@ class JobResponse(BaseModel):
     competition_id: str
     miner_hotkey: str
     hf_repo_id: str
-    benchmarks: List[str]
+    env_provider: str
+    env_name: str
     broadcast_time: Optional[datetime]
     validators_sent: int
     validators_completed: int
@@ -547,14 +548,23 @@ class BackendService:
 
                 # Create job
                 job_id = next(self.id_generator)
-                eval_job = BackendEvaluationJob(
-                    id=job_id,
-                    submission_id=submission.id,
-                    competition_id=competition_id,
-                    miner_hotkey=submission.miner_hotkey,
-                    hf_repo_id=submission.hf_repo_id,
-                    benchmarks=competition.benchmarks,
-                )
+                for benchmark in competition.benchmarks:
+                    # check if the benchmark has a provider or a benchmark name
+                    if "provider" not in benchmark or "benchmark_name" not in benchmark:
+                        logger.error(
+                            f"Benchmark missing provider or benchmark_name: {benchmark}"
+                        )
+                        continue
+
+                    eval_job = BackendEvaluationJob(
+                        id=job_id,
+                        submission_id=submission.id,
+                        competition_id=competition_id,
+                        miner_hotkey=submission.miner_hotkey,
+                        hf_repo_id=submission.hf_repo_id,
+                        env_provider=benchmark["provider"],
+                        env_name=benchmark["benchmark_name"],
+                    )
 
                 session.add(eval_job)
                 await session.commit()
@@ -580,9 +590,12 @@ class BackendService:
             # TODO: yuck.
             job_id=int(str(job.id)),
             competition_id=job.competition_id,
+            # TODO: yuck.
+            submission_id=int(str(job.submission_id)),
             miner_hotkey=job.miner_hotkey,
             hf_repo_id=job.hf_repo_id,
-            benchmarks=job.benchmarks,
+            env_provider=job.env_provider,
+            env_name=job.env_name,
         )
 
         message = job_msg.model_dump_json()

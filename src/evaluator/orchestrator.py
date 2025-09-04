@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from datetime import datetime, timezone
 
 import asyncpg
 import ray
@@ -12,6 +13,7 @@ from ray.util.queue import Queue
 from core.db.db_manager import create_database_manager
 from core.db.models import EvaluationJob
 from core.log import get_logger
+from core.messages import EvalJobMessage
 from evaluator.config import EvaluatorConfig
 from evaluator.containers import Containers
 from evaluator.rollout import BenchmarkSpec, RolloutCluster
@@ -36,7 +38,23 @@ class Orchestrator:
     async def process_job(self, job: Job):
         logger.info(f"Processing job: {job.id}")
         if job.payload:
-            evaluation_job = EvaluationJob.from_bytes(job.payload)
+            # TODO: there is probably a much better way to do this
+            eval_job_msg = EvalJobMessage.from_bytes(job.payload)
+            evaluation_job = EvaluationJob(
+                id=eval_job_msg.job_id,
+                competition_id=eval_job_msg.competition_id,
+                submission_id=eval_job_msg.submission_id,
+                miner_hotkey=eval_job_msg.miner_hotkey,
+                hf_repo_id=eval_job_msg.hf_repo_id,
+                env_provider=eval_job_msg.env_provider,
+                env_name=eval_job_msg.env_name,
+                # TODO: where should this be set?
+                logs_path="./data/logs",
+                # created at will be the current datetime
+                created_at=datetime.now(timezone.utc),
+            )  # type: ignore
+
+            # evaluation_job = EvaluationJob.from_bytes(job.payload)
             # start a container for this evaluation job
             repo = "https://huggingface.co/" + evaluation_job.hf_repo_id
             logger.info(

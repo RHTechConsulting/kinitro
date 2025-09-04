@@ -34,8 +34,6 @@ class SubmissionMixin(BaseModel):
     submission_id: int
     miner_hotkey: str = Field(..., max_length=48)
     hf_repo_id: str = Field(..., max_length=256)
-    env_provider: str = Field(..., max_length=64)
-    env_name: str = Field(..., max_length=128)
 
 
 class StatusMixin(BaseModel):
@@ -47,7 +45,12 @@ class StatusMixin(BaseModel):
 class EvaluationJobBase(BaseModel):
     """Base model for evaluation job data."""
 
-    job_id: SnowflakeId
+    id: SnowflakeId
+    competition_id: str = Field(..., max_length=64)
+    miner_hotkey: str = Field(..., max_length=48)
+    hf_repo_id: str = Field(..., max_length=256)
+    env_provider: str = Field(..., max_length=64)
+    env_name: str = Field(..., max_length=128)
     status: EvaluationStatus = EvaluationStatus.QUEUED
     container_id: Optional[str] = Field(None, max_length=128)
     ray_worker_id: Optional[str] = Field(None, max_length=128)
@@ -73,8 +76,6 @@ class EvaluationJobBase(BaseModel):
 
 class EvaluationJob(EvaluationJobBase, SubmissionMixin, TimestampMixin):
     """Full evaluation job model."""
-
-    id: int
 
     model_config = ConfigDict(from_attributes=True)
 

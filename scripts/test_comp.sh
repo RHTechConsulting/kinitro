@@ -13,15 +13,3 @@ curl -X POST "http://localhost:8080/competitions" \
     ],
     "points": 50
   }'
-
-#   class EvalJobMessage(BaseModel):
-#     """Message for broadcasting evaluation jobs from backend to validators."""
-# 
-#     message_type: str = "eval_job"
-#     job_id: str
-#     competition_id: str
-#     miner_hotkey: str
-#     hf_repo_id: str
-#     benchmarks: list[dict]
-#     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-

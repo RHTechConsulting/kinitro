@@ -124,7 +124,8 @@ def upgrade() -> None:
         sa.Column("competition_id", sa.String(length=64), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
         sa.Column("hf_repo_id", sa.String(length=256), nullable=False),
-        sa.Column("benchmarks", sa.JSON(), nullable=False),
+        sa.Column("env_provider", sa.String(length=64), nullable=False),
+        sa.Column("env_name", sa.String(length=128), nullable=False),
         sa.Column("broadcast_time", sa.DateTime(timezone=True), nullable=True),
         sa.Column("validators_sent", sa.Integer(), nullable=False, server_default="0"),
         sa.Column(

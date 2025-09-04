@@ -19,10 +19,19 @@ class EvalJobMessage(BaseModel):
     message_type: str = "eval_job"
     job_id: SnowflakeId
     competition_id: str
+    submission_id: int
     miner_hotkey: str
     hf_repo_id: str
-    benchmarks: list[dict]
+    env_provider: str
+    env_name: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_bytes(self) -> bytes:
+        return self.model_dump_json().encode("utf-8")
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "EvalJobMessage":
+        return cls.model_validate_json(data)
 
 
 class EvalResultMessage(BaseModel):
