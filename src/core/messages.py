@@ -23,7 +23,8 @@ class EvalJobMessage(BaseModel):
     miner_hotkey: str
     hf_repo_id: str
     env_provider: str
-    env_name: str
+    benchmark_name: str
+    config: dict
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_bytes(self) -> bytes:

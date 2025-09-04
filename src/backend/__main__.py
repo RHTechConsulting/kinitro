@@ -129,7 +129,8 @@ class JobResponse(BaseModel):
     miner_hotkey: str
     hf_repo_id: str
     env_provider: str
-    env_name: str
+    benchmark_name: str
+    config: dict
     broadcast_time: Optional[datetime]
     validators_sent: int
     validators_completed: int
@@ -501,12 +502,12 @@ class BackendService:
         self,
         commitment: ChainCommitmentResponse,
         block_num: int,
-        active_competitions: dict,
+        active_competitions: dict[str, Competition],
     ):
         """Process a commitment from the chain."""
         try:
             logger.debug(f"Processing commitment for block {block_num}: {commitment}")
-            competition_id = getattr(commitment.data, "competition_id", None)
+            competition_id = getattr(commitment.data, "comp_id", None)
 
             if not competition_id or competition_id not in active_competitions:
                 logger.warning(f"Unknown competition {competition_id}")
@@ -524,7 +525,7 @@ class BackendService:
                         and_(
                             MinerSubmission.miner_hotkey == commitment.hotkey,
                             MinerSubmission.competition_id == competition_id,
-                            MinerSubmission.version == commitment.data.version,
+                            MinerSubmission.version == commitment.data.v,
                         )
                     )
                 )
@@ -539,7 +540,7 @@ class BackendService:
                     miner_hotkey=commitment.hotkey,
                     competition_id=competition_id,
                     hf_repo_id=commitment.data.repo_id,
-                    version=commitment.data.version,
+                    version=commitment.data.v,
                     commitment_block=block_num,
                 )
 
@@ -563,7 +564,8 @@ class BackendService:
                         miner_hotkey=submission.miner_hotkey,
                         hf_repo_id=submission.hf_repo_id,
                         env_provider=benchmark["provider"],
-                        env_name=benchmark["benchmark_name"],
+                        benchmark_name=benchmark["benchmark_name"],
+                        config=benchmark.get("config", {}),  # Optional config
                     )
 
                 session.add(eval_job)
@@ -586,6 +588,8 @@ class BackendService:
             logger.warning("No validators connected")
             return
 
+        env_config = job.config if job.config else {}
+
         job_msg = EvalJobMessage(
             # TODO: yuck.
             job_id=int(str(job.id)),
@@ -595,7 +599,8 @@ class BackendService:
             miner_hotkey=job.miner_hotkey,
             hf_repo_id=job.hf_repo_id,
             env_provider=job.env_provider,
-            env_name=job.env_name,
+            benchmark_name=job.benchmark_name,
+            config=env_config,
         )
 
         message = job_msg.model_dump_json()
@@ -756,7 +761,7 @@ async def create_competition(competition: CompetitionCreate):
         raise HTTPException(status_code=503, detail="Database not initialized")
     async with backend_service.async_session() as session:
         db_competition = Competition(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4().hex,
             name=competition.name,
             description=competition.description,
             # TODO: consider changing the schema for this (if we need to)?

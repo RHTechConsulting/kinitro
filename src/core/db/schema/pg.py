@@ -56,7 +56,7 @@ class SubmissionMixin:
     miner_hotkey = Column(SS58Address, nullable=False, index=True)
     hf_repo_id = Column(String(256), nullable=False, index=True)
     env_provider = Column(String(64), nullable=False)
-    env_name = Column(String(128), nullable=False, index=True)
+    benchmark_name = Column(String(128), nullable=False, index=True)
 
 
 class EvaluationJob(SubmissionMixin, TimestampMixin, Base):
@@ -110,7 +110,7 @@ class EvaluationJob(SubmissionMixin, TimestampMixin, Base):
             name="ck_cpu_percent_range",
         ),
         Index("ix_eval_jobs_status_created", "status", "created_at"),
-        Index("ix_eval_jobs_miner_env", "miner_hotkey", "env_name"),
+        Index("ix_eval_jobs_miner_env", "miner_hotkey", "benchmark_name"),
         Index(
             "ix_eval_jobs_active",
             "status",
@@ -125,7 +125,7 @@ class EvaluationJob(SubmissionMixin, TimestampMixin, Base):
         ),
         # Unique constraint to prevent duplicate submissions
         UniqueConstraint(
-            "submission_id", "miner_hotkey", "env_name", name="uq_submission_miner_env"
+            "submission_id", "miner_hotkey", name="uq_submission_miner_env"
         ),
     )
 

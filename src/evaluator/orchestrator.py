@@ -47,7 +47,8 @@ class Orchestrator:
                 miner_hotkey=eval_job_msg.miner_hotkey,
                 hf_repo_id=eval_job_msg.hf_repo_id,
                 env_provider=eval_job_msg.env_provider,
-                env_name=eval_job_msg.env_name,
+                benchmark_name=eval_job_msg.benchmark_name,
+                config=eval_job_msg.config,
                 # TODO: where should this be set?
                 logs_path="./data/logs",
                 # created at will be the current datetime
@@ -97,23 +98,15 @@ class Orchestrator:
             if not node_ip:
                 raise RuntimeError("No node IP found in cluster")
 
-            submission_address = f"{node_ip}:{node_port}"
-
             # wait for some time
             # TODO: why exactly do we wait here though? just going to keep a WAIT_TIME here for now
             await asyncio.sleep(WAIT_TIME)
 
             # Create a benchmark spec for the job (example: MT1, can be customized)
-            config_dict = (
-                {"env_name": evaluation_job.env_name}
-                if hasattr(evaluation_job, "env_name")
-                else {}
-            )
-
             benchmark_spec = BenchmarkSpec(
                 provider=evaluation_job.env_provider,
-                benchmark_name=evaluation_job.env_name,
-                config=config_dict,
+                benchmark_name=evaluation_job.benchmark_name,
+                config=evaluation_job.config,
                 enable_image_obs=True,
                 render_mode="rgb_array",  # No rendering
             )

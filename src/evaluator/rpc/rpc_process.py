@@ -38,7 +38,7 @@ class RPCRequest:
     method: RPCMethod
     request_id: str
     params: dict[str, Any]
-    timeout: Optional[float] = DEFAULT_RPC_TIMEOUT
+    timeout: float = DEFAULT_RPC_TIMEOUT
 
     @classmethod
     def create_ping(
@@ -199,6 +199,10 @@ class RPCProcess:
                 case RPCMethod.RESET:
                     await self.agent.reset()
                     server_response = ServerResponse.from_reset_response()
+
+                case RPCMethod.SHUTDOWN:
+                    await self.agent.close()
+                    server_response = ServerResponse.from_shutdown_response()
 
                 case _:
                     server_response = ServerResponse.from_error(
