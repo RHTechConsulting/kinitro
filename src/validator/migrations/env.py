@@ -3,22 +3,23 @@ Alembic environment configuration for validator database.
 """
 
 import asyncio
-import sys
 import os
-from pathlib import Path
+import sys
 from logging.config import fileConfig
+from pathlib import Path
+
+from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from alembic import context
+from validator.db.models import Base
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 # Import the validator models
-from src.validator.models import Base
 
 # this is the Alembic Config object
 config = context.config

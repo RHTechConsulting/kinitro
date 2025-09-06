@@ -200,10 +200,6 @@ class RPCProcess:
                     await self.agent.reset()
                     server_response = ServerResponse.from_reset_response()
 
-                case RPCMethod.SHUTDOWN:
-                    await self.agent.close()
-                    server_response = ServerResponse.from_shutdown_response()
-
                 case _:
                     server_response = ServerResponse.from_error(
                         request.method, f"Unknown RPC method: {request.method}"

@@ -10,7 +10,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from core.db.models import SnowflakeId
+from validator.db.models import SnowflakeId
 
 
 class EvalJobMessage(BaseModel):

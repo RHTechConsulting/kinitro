@@ -5,7 +5,7 @@ import asyncpg
 from pgqueuer import AsyncpgDriver, Queries
 from snowflake import SnowflakeGenerator
 
-from core.db.models import EvaluationJob, EvaluationStatus
+from validator.db.models import EvaluationJob, EvaluationStatus
 
 
 async def main():

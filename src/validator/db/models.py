@@ -5,9 +5,10 @@ These models are used for validator-specific data storage including
 evaluation jobs, results, and local state management.
 """
 
+import enum
 from datetime import datetime, timezone
-from typing import List
 
+from pydantic import Field
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -23,12 +24,24 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from typing_extensions import Annotated
 
-from core.db.models import EvaluationStatus
+SnowflakeId = Annotated[int, Field(ge=0, le=(2**63 - 1))]
 
 # Base class for all validator models
 Base = declarative_base()
+
+
+class EvaluationStatus(enum.Enum):
+    """Evaluation job status enum."""
+
+    QUEUED = "queued"
+    STARTING = "starting"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
 
 
 class TimestampMixin:
@@ -44,7 +57,8 @@ class TimestampMixin:
     )
 
 
-class ValidatorEvaluationJob(TimestampMixin, Base):
+# TODO: create base models for a bunch of these? or perhaps just not do it and move straigh to using sqlmodel
+class EvaluationJob(TimestampMixin, Base):
     """Evaluation jobs received from backend."""
 
     __tablename__ = "validator_evaluation_jobs"
@@ -53,10 +67,13 @@ class ValidatorEvaluationJob(TimestampMixin, Base):
     job_id = Column(String(128), nullable=False, unique=True, index=True)
 
     # Submission metadata
+    submission_id = Column(BigInteger, nullable=False, index=True)
     competition_id = Column(String(128), nullable=False, index=True)
     miner_hotkey = Column(String(48), nullable=False, index=True)
     hf_repo_id = Column(String(256), nullable=False)
-    benchmarks = Column(JSON, nullable=False)  # List of benchmark names
+    env_provider = Column(String(128), nullable=False)
+    benchmark_name = Column(String(128), nullable=False)
+    config = Column(JSON, nullable=True)
 
     # Job execution
     status = Column(
@@ -87,11 +104,11 @@ class ValidatorEvaluationJob(TimestampMixin, Base):
 
     # Relationships
     results = relationship(
-        "ValidatorEvaluationResult", back_populates="job", cascade="all, delete-orphan"
+        "EvaluationResult", back_populates="job", cascade="all, delete-orphan"
     )
 
 
-class ValidatorEvaluationResult(TimestampMixin, Base):
+class EvaluationResult(TimestampMixin, Base):
     """Results of evaluation jobs."""
 
     __tablename__ = "validator_evaluation_results"
@@ -132,7 +149,7 @@ class ValidatorEvaluationResult(TimestampMixin, Base):
     submission_error = Column(Text, nullable=True)
 
     # Relationships
-    job = relationship("ValidatorEvaluationJob", back_populates="results")
+    job = relationship("EvaluationJob", back_populates="results")
 
 
 class ValidatorState(TimestampMixin, Base):
@@ -162,57 +179,3 @@ class ValidatorState(TimestampMixin, Base):
     # Performance metrics
     avg_job_duration_seconds = Column(Float, nullable=True)
     last_performance_update = Column(DateTime, nullable=True)
-
-
-class ValidatorLog(TimestampMixin, Base):
-    """Local validator log entries."""
-
-    __tablename__ = "validator_logs"
-
-    id = Column(BigInteger, primary_key=True)
-
-    # Log metadata
-    level = Column(String(10), nullable=False, index=True)  # DEBUG, INFO, WARN, ERROR
-    component = Column(
-        String(64), nullable=True, index=True
-    )  # websocket_validator, evaluation, etc.
-
-    # Log content
-    message = Column(Text, nullable=False)
-    exception = Column(Text, nullable=True)
-
-    # Context
-    job_id = Column(String(128), nullable=True, index=True)
-    benchmark = Column(String(128), nullable=True)
-    miner_hotkey = Column(String(48), nullable=True, index=True)
-
-    # Additional data
-    extra_data = Column(JSON, nullable=True)
-
-
-class ValidatorMetrics(TimestampMixin, Base):
-    """Performance and health metrics."""
-
-    __tablename__ = "validator_metrics"
-
-    id = Column(BigInteger, primary_key=True)
-
-    # Metric metadata
-    metric_name = Column(String(128), nullable=False, index=True)
-    metric_type = Column(String(32), nullable=False)  # counter, gauge, histogram
-
-    # Metric values
-    value = Column(Float, nullable=False)
-    count = Column(Integer, nullable=True)  # For counters/histograms
-
-    # Context
-    job_id = Column(String(128), nullable=True, index=True)
-    benchmark = Column(String(128), nullable=True)
-
-    # Tags/labels
-    tags = Column(JSON, nullable=True)
-
-    # Timestamp (separate from created_at for metric collection time)
-    timestamp = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True
-    )

@@ -10,14 +10,14 @@ from pgqueuer.db import AsyncpgDriver
 from pgqueuer.models import Job
 from ray.util.queue import Queue
 
-from core.db.db_manager import create_database_manager
-from core.db.models import EvaluationJob
 from core.log import get_logger
 from core.messages import EvalJobMessage
 from evaluator.config import EvaluatorConfig
 from evaluator.containers import Containers
 from evaluator.rollout import BenchmarkSpec, RolloutCluster
 from evaluator.rpc.rpc_process import RPCProcess
+from validator.db.db_manager import create_database_manager
+from validator.db.models import EvaluationJob
 
 logger = get_logger(__name__)
 
