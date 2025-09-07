@@ -18,6 +18,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from core.log import get_logger
 from core.messages import (
     EvalJobMessage,
+    EvalResultMessage,
     HeartbeatMessage,
     ValidatorRegisterMessage,
 )

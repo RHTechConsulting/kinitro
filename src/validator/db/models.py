@@ -22,39 +22,9 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from typing_extensions import Annotated
 
-SnowflakeId = Annotated[int, Field(ge=0, le=(2**63 - 1))]
-
-# Base class for all validator models
-Base = declarative_base()
-
-
-class EvaluationStatus(enum.Enum):
-    """Evaluation job status enum."""
-
-    QUEUED = "queued"
-    STARTING = "starting"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    TIMEOUT = "timeout"
-
-
-class TimestampMixin:
-    """Mixin for created/updated timestamps."""
-
-    created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
-    )
-    updated_at = Column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
+from core.db.models import Base, EvaluationStatus, TimestampMixin
 
 
 # TODO: create base models for a bunch of these? or perhaps just not do it and move straigh to using sqlmodel
@@ -64,7 +34,6 @@ class EvaluationJob(TimestampMixin, Base):
     __tablename__ = "validator_evaluation_jobs"
 
     id = Column(BigInteger, primary_key=True)
-    job_id = Column(String(128), nullable=False, unique=True, index=True)
 
     # Submission metadata
     submission_id = Column(BigInteger, nullable=False, index=True)
@@ -115,8 +84,8 @@ class EvaluationResult(TimestampMixin, Base):
 
     id = Column(BigInteger, primary_key=True)
     job_id = Column(
-        String(128),
-        ForeignKey("validator_evaluation_jobs.job_id"),
+        BigInteger,
+        ForeignKey("validator_evaluation_jobs.id"),
         nullable=False,
         index=True,
     )

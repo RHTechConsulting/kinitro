@@ -127,11 +127,6 @@ def upgrade() -> None:
         sa.Column("env_provider", sa.String(length=64), nullable=False),
         sa.Column("benchmark_name", sa.String(length=128), nullable=False),
         sa.Column("config", sa.JSON(), nullable=False),
-        sa.Column("broadcast_time", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("validators_sent", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column(
-            "validators_completed", sa.Integer(), nullable=False, server_default="0"
-        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -143,16 +138,6 @@ def upgrade() -> None:
             sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.func.now(),
-        ),
-        sa.CheckConstraint(
-            "validators_sent >= 0", name="ck_validators_sent_non_negative"
-        ),
-        sa.CheckConstraint(
-            "validators_completed >= 0", name="ck_validators_completed_non_negative"
-        ),
-        sa.CheckConstraint(
-            "validators_completed <= validators_sent",
-            name="ck_validators_completed_within_sent",
         ),
         sa.ForeignKeyConstraint(
             ["competition_id"],
@@ -167,9 +152,6 @@ def upgrade() -> None:
 
     # Create indexes for backend_evaluation_jobs
     op.create_index(
-        "ix_backend_evaluation_jobs_job_id", "backend_evaluation_jobs", ["id"]
-    )
-    op.create_index(
         "ix_backend_evaluation_jobs_submission_id",
         "backend_evaluation_jobs",
         ["submission_id"],
@@ -180,19 +162,70 @@ def upgrade() -> None:
         ["competition_id"],
     )
     op.create_index(
-        "ix_backend_evaluation_jobs_broadcast",
-        "backend_evaluation_jobs",
-        ["broadcast_time"],
+        "ix_backend_jobs_miner", "backend_evaluation_jobs", ["miner_hotkey"]
+    )
+
+    # Create backend_evaluation_job_status table (new table from models)
+    op.create_table(
+        "backend_evaluation_job_status",
+        sa.Column("id", sa.BigInteger(), nullable=False),
+        sa.Column("job_id", sa.BigInteger(), nullable=False),
+        sa.Column("validator_hotkey", sa.String(length=48), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "QUEUED",
+                "STARTING",
+                "RUNNING",
+                "COMPLETED",
+                "FAILED",
+                "CANCELLED",
+                "TIMEOUT",
+                name="evaluationstatus",
+            ),
+            nullable=False,
+        ),
+        sa.Column("detail", sa.Text(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.ForeignKeyConstraint(
+            ["job_id"],
+            ["backend_evaluation_jobs.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    # Create indexes for backend_evaluation_job_status
+    op.create_index(
+        "ix_backend_job_status_job", "backend_evaluation_job_status", ["job_id"]
     )
     op.create_index(
-        "ix_backend_evaluation_jobs_miner", "backend_evaluation_jobs", ["miner_hotkey"]
+        "ix_backend_job_status_validator",
+        "backend_evaluation_job_status",
+        ["validator_hotkey"],
+    )
+    op.create_index(
+        "ix_backend_job_status_status", "backend_evaluation_job_status", ["status"]
+    )
+    op.create_index(
+        "ix_backend_job_status_time", "backend_evaluation_job_status", ["created_at"]
     )
 
     # Create backend_evaluation_results table
     op.create_table(
         "backend_evaluation_results",
         sa.Column("id", sa.BigInteger(), nullable=False),
-        sa.Column("backend_job_id", sa.BigInteger(), nullable=False),
+        sa.Column("job_id", sa.BigInteger(), nullable=False),
         sa.Column("validator_hotkey", sa.String(length=48), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
         sa.Column("competition_id", sa.String(length=64), nullable=False),
@@ -231,12 +264,12 @@ def upgrade() -> None:
             "total_episodes IS NULL OR total_episodes > 0", name="ck_episodes_positive"
         ),
         sa.ForeignKeyConstraint(
-            ["backend_job_id"],
+            ["job_id"],
             ["backend_evaluation_jobs.id"],
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
-            "backend_job_id",
+            "job_id",
             "validator_hotkey",
             "benchmark",
             name="uq_job_validator_benchmark",
@@ -245,38 +278,33 @@ def upgrade() -> None:
 
     # Create indexes for backend_evaluation_results
     op.create_index(
-        "ix_backend_evaluation_results_job_id", "backend_evaluation_results", ["id"]
-    )
-    op.create_index(
-        "ix_backend_evaluation_results_backend_job_id",
+        "ix_backend_evaluation_results_job_id",
         "backend_evaluation_results",
-        ["backend_job_id"],
+        ["job_id"],
     )
     op.create_index(
-        "ix_backend_evaluation_results_validator",
+        "ix_backend_results_validator",
         "backend_evaluation_results",
         ["validator_hotkey"],
     )
     op.create_index(
-        "ix_backend_evaluation_results_miner",
+        "ix_backend_results_miner",
         "backend_evaluation_results",
         ["miner_hotkey"],
     )
     op.create_index(
-        "ix_backend_evaluation_results_competition",
+        "ix_backend_results_competition",
         "backend_evaluation_results",
         ["competition_id"],
     )
     op.create_index(
-        "ix_backend_evaluation_results_benchmark",
+        "ix_backend_results_benchmark",
         "backend_evaluation_results",
         ["benchmark"],
     )
+    op.create_index("ix_backend_results_score", "backend_evaluation_results", ["score"])
     op.create_index(
-        "ix_backend_evaluation_results_score", "backend_evaluation_results", ["score"]
-    )
-    op.create_index(
-        "ix_backend_evaluation_results_time",
+        "ix_backend_results_time",
         "backend_evaluation_results",
         ["result_time"],
     )
@@ -392,6 +420,7 @@ def downgrade() -> None:
     op.drop_table("backend_state")
     op.drop_table("validator_connections")
     op.drop_table("backend_evaluation_results")
+    op.drop_table("backend_evaluation_job_status")
     op.drop_table("backend_evaluation_jobs")
     op.drop_table("miner_submissions")
     op.drop_table("competitions")

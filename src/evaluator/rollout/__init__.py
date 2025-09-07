@@ -8,7 +8,7 @@ import ray
 import torch
 from ray.util.queue import Queue
 
-from validator.db.models import SnowflakeId
+from core.db.models import SnowflakeId
 from core.log import get_logger
 
 from ..rpc.rpc_process import RPCRequest
@@ -78,7 +78,7 @@ class RolloutWorker:
         self.env_manager = EnvManager()
         # TODO: these should be based on the benchmarks specs, not hardcoded
         self.episodes_per_task = 1
-        self.max_steps_per_episode = 25
+        self.max_steps_per_episode = 2
         self.eval_start = None
         self.eval_end = None
 

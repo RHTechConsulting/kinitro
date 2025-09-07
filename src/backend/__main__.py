@@ -1,5 +1,4 @@
 """
-FastAPI backend application for Kinitro.
 
 This provides REST API endpoints and WebSocket connections for:
 - Competition management

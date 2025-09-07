@@ -10,7 +10,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from validator.db.models import SnowflakeId
+from core.db.models import EvaluationStatus, SnowflakeId
 
 
 class EvalJobMessage(BaseModel):
@@ -43,7 +43,9 @@ class EvalResultMessage(BaseModel):
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
-    benchmark: dict
+    env_provider: str
+    benchmark_name: str
+    config: dict
     score: float
     success_rate: Optional[float] = None
     avg_reward: Optional[float] = None
@@ -81,7 +83,7 @@ class RegistrationAckMessage(BaseModel):
     """Acknowledgment message for validator registration."""
 
     message_type: str = "registration_ack"
-    status: str
+    status: EvaluationStatus
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -90,7 +92,7 @@ class ResultAckMessage(BaseModel):
 
     message_type: str = "result_ack"
     job_id: SnowflakeId
-    status: str
+    status: EvaluationStatus
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

@@ -1,17 +1,20 @@
-import json
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
-import duckdb
+import asyncpg
+from pgqueuer import Queries
+from pgqueuer.db import AsyncpgDriver
 from snowflake import SnowflakeGenerator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+from core.db.models import SnowflakeId
+from core.messages import EvalResultMessage
 
 from .models import (
     EvaluationJob,
     EvaluationResult,
     EvaluationStatus,
-    SnowflakeId,
 )
 from .models import (
     EvaluationJob as PGEvaluationJob,
@@ -19,25 +22,18 @@ from .models import (
 from .models import (
     EvaluationResult as PGEvaluationResult,
 )
-from .schema.duckdb import (
-    # Episode,
-    # EpisodeStep,
-    setup_duckdb_database,
-)
 
 
 class DatabaseManager:
-    """Manages connections and operations for both PostgreSQL and DuckDB."""
+    """Manages connections and operations for PostgreSQL."""
 
     def __init__(
         self,
         postgres_url: str,
-        duckdb_path: str = "evaluation_data.duckdb",
         echo: bool = False,
     ):
         """Initialize database connections."""
         self.postgres_url = postgres_url
-        self.duckdb_path = duckdb_path
         self.echo = echo
 
         self.snowflakeGen = SnowflakeGenerator(42)
@@ -45,14 +41,6 @@ class DatabaseManager:
         # PostgreSQL setup
         self.pg_engine = create_engine(postgres_url, echo=echo)
         self.pg_session_factory = sessionmaker(bind=self.pg_engine)
-
-        # DuckDB setup
-        self.duck_conn: Optional[duckdb.DuckDBPyConnection] = None
-
-    def initialize_databases(self) -> None:
-        """Initialize both databases with their schemas."""
-        # Initialize DuckDB
-        self.duck_conn = setup_duckdb_database(self.duckdb_path)
 
     @contextmanager
     def pg_session(self):
@@ -67,34 +55,18 @@ class DatabaseManager:
         finally:
             session.close()
 
-    @contextmanager
-    def duck_session(self):
-        """Context manager for DuckDB sessions."""
-        if self.duck_conn is None:
-            self.duck_conn = setup_duckdb_database(self.duckdb_path)
-        try:
-            yield self.duck_conn
-        except Exception:
-            # DuckDB auto-rollbacks on exceptions
-            raise
-
     def close_connections(self) -> None:
         """Close all database connections."""
-        if self.duck_conn:
-            self.duck_conn.close()
-            self.duck_conn = None
         self.pg_engine.dispose()
 
     # PostgreSQL Operations - Evaluation Jobs
 
-    def create_evaluation_job(self, job_data: EvaluationJob) -> EvaluationJob:
+    def create_evaluation_job(self, pg_job: EvaluationJob) -> None:
         """Create a new evaluation job."""
         with self.pg_session() as session:
-            pg_job = PGEvaluationJob(**job_data.model_dump())
             session.add(pg_job)
             session.flush()  # Get ID
             session.refresh(pg_job)
-            return EvaluationJob.model_validate(pg_job)
 
     def get_evaluation_job(self, job_id: SnowflakeId) -> Optional[EvaluationJob]:
         """Get an evaluation job by ID."""
@@ -104,13 +76,11 @@ class DatabaseManager:
                 .filter(PGEvaluationJob.id == job_id)
                 .first()
             )
-            if pg_job:
-                return EvaluationJob.model_validate(pg_job)
-            return None
+            return pg_job
 
     def update_evaluation_job(
         self, job_id: SnowflakeId, updates: Dict[str, Any]
-    ) -> Optional[EvaluationJob]:
+    ) -> None:
         """Update an evaluation job."""
         with self.pg_session() as session:
             pg_job = (
@@ -129,7 +99,6 @@ class DatabaseManager:
 
             session.flush()
             session.refresh(pg_job)
-            return EvaluationJob.model_validate(pg_job)
 
     def get_evaluation_jobs_by_status(
         self, status: EvaluationStatus
@@ -200,21 +169,15 @@ class DatabaseManager:
             session.refresh(pg_result)
             return EvaluationResult.model_validate(pg_result)
 
+    async def queue_evaluation_result_msg(self, eval_result: EvalResultMessage) -> None:
+        """Queue an evaluation result message for processing."""
+        # TODO: there is probably a better way to do this
+        conn = await asyncpg.connect(dsn=self.postgres_url)
+        driver = AsyncpgDriver(conn)
+        q = Queries(driver)
+        eval_result_bytes = eval_result.model_dump_json().encode("utf-8")
+        await q.enqueue(["eval_result"], [eval_result_bytes], [0])
+        await conn.close()
 
-# TODO: bring back duckdb episode logging functions
 
-
-# Factory function for easy setup
-def create_database_manager(
-    postgres_url: str,
-    duckdb_path: str = "evaluation_data.duckdb",
-    echo: bool = False,
-    initialize: bool = True,
-) -> DatabaseManager:
-    """Create and optionally initialize a database manager."""
-    manager = DatabaseManager(postgres_url, duckdb_path, echo)
-
-    if initialize:
-        manager.initialize_databases()
-
-    return manager
+# TODO: add episode logging functions?

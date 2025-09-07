@@ -25,11 +25,3 @@ class EvaluatorConfig(Config):
                 "pg_database", "postgresql://user:password@localhost/dbname"
             ),  # type: ignore
         )
-
-        # duck db
-        self._parser.add_argument(
-            "--duck-db",
-            type=str,
-            help="DuckDB file path",
-            default=self.settings.get("duck_db", "data/evaluator.duckdb"),  # type: ignore
-        )

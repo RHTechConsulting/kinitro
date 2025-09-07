@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Enum,
     Float,
     ForeignKey,
     Index,
@@ -22,6 +23,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
+from core.db.models import EvaluationStatus, TimestampMixin
+
 
 class Base(DeclarativeBase):
     pass
@@ -30,20 +33,6 @@ class Base(DeclarativeBase):
 # Type aliases for consistency
 SnowflakeColumn = BigInteger  # SQLAlchemy column type for snowflake IDs
 SS58Address = String(48)
-
-
-class TimestampMixin:
-    """Mixin for created/updated timestamps."""
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
 
 
 class Competition(TimestampMixin, Base):
@@ -166,35 +155,46 @@ class BackendEvaluationJob(TimestampMixin, Base):
     benchmark_name: Mapped[str] = mapped_column(String(128), nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False)
 
-    # Job status tracking
-    broadcast_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    validators_sent: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
-    )
-    validators_completed: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
-    )
-
     # Relationships
     submission = relationship("MinerSubmission", back_populates="evaluation_jobs")
     competition = relationship("Competition", back_populates="evaluation_jobs")
     results = relationship(
         "BackendEvaluationResult", back_populates="job", cascade="all, delete-orphan"
     )
+    status_updates = relationship(
+        "BackendEvaluationJobStatus", back_populates="job", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (Index("ix_backend_jobs_miner", "miner_hotkey"),)
+
+
+class BackendEvaluationJobStatus(TimestampMixin, Base):
+    """Track status updates for backend evaluation jobs."""
+
+    __tablename__ = "backend_evaluation_job_status"
+
+    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
+
+    job_id: Mapped[SnowflakeColumn] = mapped_column(
+        SnowflakeColumn,
+        ForeignKey("backend_evaluation_jobs.id"),
+        nullable=False,
+        index=True,
+    )
+    validator_hotkey: Mapped[str] = mapped_column(
+        SS58Address, nullable=False, index=True
+    )  # Validator reporting the status
+    status: Mapped[EvaluationStatus] = mapped_column(
+        Enum(EvaluationStatus), nullable=False, index=True
+    )
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Relationship
+    job = relationship("BackendEvaluationJob", back_populates="status_updates")
 
     __table_args__ = (
-        CheckConstraint("validators_sent >= 0", name="ck_validators_sent_non_negative"),
-        CheckConstraint(
-            "validators_completed >= 0", name="ck_validators_completed_non_negative"
-        ),
-        CheckConstraint(
-            "validators_completed <= validators_sent",
-            name="ck_validators_completed_within_sent",
-        ),
-        Index("ix_backend_jobs_broadcast", "broadcast_time"),
-        Index("ix_backend_jobs_miner", "miner_hotkey"),
+        Index("ix_backend_job_status_job", "job_id"),
+        Index("ix_backend_job_status_time", "created_at"),
     )
 
 
@@ -272,6 +272,7 @@ class ValidatorConnection(TimestampMixin, Base):
     validator_hotkey: Mapped[str] = mapped_column(
         SS58Address, nullable=False, unique=True, index=True
     )
+    # TODO: better naming?
     connection_id: Mapped[str] = mapped_column(
         String(128), nullable=False, index=True
     )  # IP:port or other identifier
