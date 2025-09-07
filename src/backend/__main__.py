@@ -1206,11 +1206,10 @@ async def validator_websocket(websocket: WebSocket):
                         eval_result = BackendEvaluationResult(
                             id=next(backend_service.id_generator),
                             job_id=result_msg.job_id,
-                            backend_job_id=backend_job.id,
                             validator_hotkey=validator_hotkey,
                             miner_hotkey=result_msg.miner_hotkey,
                             competition_id=result_msg.competition_id,
-                            benchmark=result_msg.benchmark,
+                            benchmark=result_msg.benchmark_name,
                             score=result_msg.score,
                             success_rate=result_msg.success_rate,
                             avg_reward=result_msg.avg_reward,
@@ -1221,9 +1220,6 @@ async def validator_websocket(websocket: WebSocket):
                         )
 
                         session.add(eval_result)
-
-                        # Update job stats
-                        backend_job.validators_completed += 1
 
                         # Update validator stats
                         val_result = await session.execute(

@@ -116,7 +116,8 @@ class RolloutWorker:
                 logger.info(
                     "Running all tasks for benchmark: %s", benchmark_spec.benchmark_name
                 )
-                task_specs = self.env_manager.get_benchmark_envs(benchmark_spec)
+                # TODO: REMOVE HARDCODED LIMIT
+                task_specs = self.env_manager.get_benchmark_envs(benchmark_spec)[:2]
                 all_task_specs.extend(task_specs)
                 logger.info(
                     "Discovered %d tasks for %s", len(task_specs), benchmark_spec

@@ -11,7 +11,7 @@ from typing import Optional
 
 import asyncpg
 import websockets
-from pgqueuer import Queries
+from pgqueuer import Job, PgQueuer, Queries
 from pgqueuer.db import AsyncpgDriver
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
@@ -50,6 +50,7 @@ class WebSocketValidator(Neuron):
         self.connected = False
         self._running = False
         self._heartbeat_task = None
+        self._result_processor_task = None
 
         # Database and pgqueue
         self.database_url = config.settings.get(
@@ -71,6 +72,9 @@ class WebSocketValidator(Neuron):
         """Start the validator service."""
         logger.info("Starting WebSocket Validator")
         self._running = True
+
+        # Start the result processor task
+        self._result_processor_task = asyncio.create_task(self._process_results())
 
         # Connect to backend with auto-reconnect
         while self._running:
@@ -97,6 +101,14 @@ class WebSocketValidator(Neuron):
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        # Cancel result processor
+        if self._result_processor_task:
+            self._result_processor_task.cancel()
+            try:
+                await self._result_processor_task
             except asyncio.CancelledError:
                 pass
 
@@ -223,6 +235,65 @@ class WebSocketValidator(Neuron):
         q = Queries(driver)
         await q.enqueue(["add_job"], [job_bytes], [0])
         logger.info(f"Job {job.job_id} queued successfully")
+
+    async def _process_results(self):
+        """Process evaluation results from pgqueue and send them to the backend."""
+        logger.info("Starting result processor task")
+
+        try:
+            # Connect to the postgres database
+            conn = await asyncpg.connect(dsn=self.database_url)
+            driver = AsyncpgDriver(conn)
+            pgq = PgQueuer(driver)
+
+            @pgq.entrypoint("eval_result")
+            async def process_result(job: Job) -> None:
+                """Process an evaluation result from the queue."""
+                try:
+                    # Parse the result from the job payload
+                    result_data = json.loads(job.payload.decode("utf-8"))
+                    eval_result = EvalResultMessage(**result_data)
+
+                    logger.info(
+                        f"Processing evaluation result for job {eval_result.job_id}"
+                    )
+
+                    # Send the result to the backend if connected
+                    if self.connected and self.websocket:
+                        await self._send_eval_result(eval_result)
+                        logger.info(
+                            f"Sent evaluation result for job {eval_result.job_id} to backend"
+                        )
+                    else:
+                        # If not connected, the job will remain in queue and be retried
+                        logger.warning(
+                            f"Not connected to backend, result for job {eval_result.job_id} will be retried"
+                        )
+                        raise Exception("Not connected to backend")
+
+                except Exception as e:
+                    logger.error(f"Failed to process evaluation result: {e}")
+                    # Re-raise to let pgqueue handle retry
+                    raise
+
+            logger.info("Result processor is now listening for evaluation results...")
+            await pgq.run()
+
+        except asyncio.CancelledError:
+            logger.info("Result processor task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Result processor error: {e}")
+            # Restart the processor after a delay if still running
+            if self._running:
+                await asyncio.sleep(5)
+                self._result_processor_task = asyncio.create_task(
+                    self._process_results()
+                )
+
+    async def _send_eval_result(self, result: EvalResultMessage):
+        """Send evaluation result to the backend."""
+        await self._send_message(result.model_dump())
 
     async def _send_message(self, message: dict):
         """Send message to backend."""

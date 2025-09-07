@@ -11,6 +11,7 @@ from pgqueuer import PgQueuer
 from pgqueuer.db import AsyncpgDriver
 from pgqueuer.models import Job
 from ray.util.queue import Queue
+from snowflake import SnowflakeGenerator
 
 from core.db.models import EvaluationStatus
 from core.log import get_logger
@@ -22,7 +23,6 @@ from evaluator.rollout.envs import EnvResult
 from evaluator.rpc.rpc_process import RPCProcess
 from validator.db.db_manager import DatabaseManager
 from validator.db.models import EvaluationJob
-from snowflake import SnowflakeGenerator
 
 logger = get_logger(__name__)
 
