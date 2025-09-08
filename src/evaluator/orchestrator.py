@@ -145,6 +145,10 @@ class Orchestrator:
                 node_ip,
                 node_port,
                 eval_job_msg.submission_id,
+                r2_config=self.config.r2_config,
+                episode_log_interval=self.config.episode_log_interval,
+                step_log_interval=self.config.step_log_interval,
+                database_url=self.config.pg_database,
             )
 
             rpc_thread = threading.Thread(

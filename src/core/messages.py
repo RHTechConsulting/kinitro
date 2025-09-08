@@ -96,6 +96,43 @@ class ResultAckMessage(SQLModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class EpisodeDataMessage(SQLModel):
+    """Message for sending episode data from validators to backend."""
+
+    message_type: str = "episode_data"
+    job_id: SnowflakeId
+    submission_id: str
+    task_id: str  # Unique identifier for the task within the job
+    episode_id: int
+    env_name: str
+    benchmark_name: str
+    total_reward: float
+    success: bool
+    steps: int
+    start_time: datetime
+    end_time: datetime
+    extra_metrics: Optional[dict] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EpisodeStepDataMessage(SQLModel):
+    """Message for sending episode step data from validators to backend."""
+
+    message_type: str = "episode_step_data"
+    submission_id: str
+    task_id: str  # Unique identifier for the task within the job
+    episode_id: int
+    step: int
+    action: dict
+    reward: float
+    done: bool
+    truncated: bool
+    observation_refs: dict
+    info: Optional[dict] = None
+    step_timestamp: datetime
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ErrorMessage(SQLModel):
     """Error message for communication issues."""
 

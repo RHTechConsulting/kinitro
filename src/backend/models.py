@@ -277,6 +277,120 @@ class BackendEvaluationResult(TimestampMixin, SQLModel, table=True):
     )
 
 
+class EpisodeData(TimestampMixin, SQLModel, table=True):
+    """Episode-level data for evaluation runs."""
+
+    __tablename__ = "episode_data"
+
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
+
+    # Link to evaluation job
+    job_id: int = Field(
+        sa_column=Column(
+            BigInteger,
+            ForeignKey("backend_evaluation_jobs.id"),
+            nullable=False,
+            index=True,
+        )
+    )
+    submission_id: str = Field(max_length=128, nullable=False, index=True)
+
+    # Episode metadata
+    task_id: str = Field(max_length=128, nullable=False, index=True)
+    episode_id: int = Field(nullable=False, index=True)
+    env_name: str = Field(max_length=128, nullable=False)
+    benchmark_name: str = Field(max_length=128, nullable=False)
+
+    # Episode results
+    total_reward: float = Field(nullable=False)
+    success: bool = Field(nullable=False, index=True)
+    steps: int = Field(nullable=False)
+
+    # Timing
+    start_time: datetime = Field(
+        sa_column=Column(SADateTime(timezone=True), nullable=False)
+    )
+    end_time: datetime = Field(
+        sa_column=Column(SADateTime(timezone=True), nullable=False)
+    )
+
+    # Additional metrics
+    extra_metrics: Optional[dict] = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )
+
+    # Relationships
+    episode_steps: List["EpisodeStepData"] = Relationship(
+        back_populates="episode", cascade_delete=True
+    )
+
+    __table_args__ = (
+        Index("ix_episode_data_submission", "submission_id"),
+        Index("ix_episode_data_task", "task_id"),
+        Index("ix_episode_data_episode", "episode_id"),
+        Index("ix_episode_data_success", "success"),
+        Index("ix_episode_data_submission_task", "submission_id", "task_id"),
+    )
+
+
+class EpisodeStepData(TimestampMixin, SQLModel, table=True):
+    """Step-level data within episodes."""
+
+    __tablename__ = "episode_step_data"
+
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
+
+    # Link to episode
+    episode_id: int = Field(
+        sa_column=Column(
+            BigInteger,
+            ForeignKey("episode_data.id"),
+            nullable=False,
+            index=True,
+        )
+    )
+    submission_id: str = Field(max_length=128, nullable=False, index=True)
+
+    # Step metadata
+    task_id: str = Field(max_length=128, nullable=False, index=True)
+    step: int = Field(nullable=False, index=True)
+
+    # Action taken
+    action: dict = Field(sa_column=Column(JSON, nullable=False))
+
+    # Reward received
+    reward: float = Field(nullable=False)
+
+    # Terminal states
+    done: bool = Field(nullable=False)
+    truncated: bool = Field(default=False, nullable=False)
+
+    # Observation storage references
+    observation_refs: dict = Field(
+        sa_column=Column(JSON, nullable=False)
+    )  # {"camera_name": {"bucket": "...", "key": "...", "url": "..."}}
+
+    # Additional info from environment
+    info: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    # Timing
+    timestamp: datetime = Field(
+        sa_column=Column(SADateTime(timezone=True), nullable=False)
+    )
+
+    # Relationships
+    episode: Optional["EpisodeData"] = Relationship(back_populates="episode_steps")
+
+    __table_args__ = (
+        Index("ix_episode_step_submission", "submission_id"),
+        Index("ix_episode_step_task", "task_id"),
+        Index("ix_episode_step_step", "step"),
+        UniqueConstraint(
+            "episode_id", "step", name="uq_episode_step"
+        ),  # Ensure unique steps per episode
+    )
+
+
 class ValidatorConnection(TimestampMixin, SQLModel, table=True):
     """Track validator connections and statistics."""
 

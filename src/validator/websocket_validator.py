@@ -17,6 +17,8 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from core.log import get_logger
 from core.messages import (
+    EpisodeDataMessage,
+    EpisodeStepDataMessage,
     EvalJobMessage,
     EvalResultMessage,
     HeartbeatMessage,
@@ -276,6 +278,66 @@ class WebSocketValidator(Neuron):
                     # Re-raise to let pgqueue handle retry
                     raise
 
+            @pgq.entrypoint("episode_data")
+            async def process_episode_data(job: Job) -> None:
+                """Process episode data from the queue."""
+                try:
+                    # Parse the episode data from the job payload
+                    episode_data = json.loads(job.payload.decode("utf-8"))
+                    episode_msg = EpisodeDataMessage(**episode_data)
+
+                    logger.info(
+                        f"Processing episode data for submission {episode_msg.submission_id}, episode {episode_msg.episode_id}"
+                    )
+
+                    # Send the episode data to the backend if connected
+                    if self.connected and self.websocket:
+                        await self._send_episode_data(episode_msg)
+                        logger.info(
+                            f"Sent episode data for episode {episode_msg.episode_id} to backend"
+                        )
+                    else:
+                        # If not connected, the job will remain in queue and be retried
+                        logger.warning(
+                            f"Not connected to backend, episode data for episode {episode_msg.episode_id} will be retried"
+                        )
+                        raise Exception("Not connected to backend")
+
+                except Exception as e:
+                    logger.error(f"Failed to process episode data: {e}")
+                    # Re-raise to let pgqueue handle retry
+                    raise
+
+            @pgq.entrypoint("episode_step_data")
+            async def process_episode_step_data(job: Job) -> None:
+                """Process episode step data from the queue."""
+                try:
+                    # Parse the step data from the job payload
+                    step_data = json.loads(job.payload.decode("utf-8"))
+                    step_msg = EpisodeStepDataMessage(**step_data)
+
+                    logger.info(
+                        f"Processing step data for submission {step_msg.submission_id}, episode {step_msg.episode_id}, step {step_msg.step}"
+                    )
+
+                    # Send the step data to the backend if connected
+                    if self.connected and self.websocket:
+                        await self._send_episode_step_data(step_msg)
+                        logger.info(
+                            f"Sent step data for episode {step_msg.episode_id}, step {step_msg.step} to backend"
+                        )
+                    else:
+                        # If not connected, the job will remain in queue and be retried
+                        logger.warning(
+                            f"Not connected to backend, step data for episode {step_msg.episode_id}, step {step_msg.step} will be retried"
+                        )
+                        raise Exception("Not connected to backend")
+
+                except Exception as e:
+                    logger.error(f"Failed to process episode step data: {e}")
+                    # Re-raise to let pgqueue handle retry
+                    raise
+
             logger.info("Result processor is now listening for evaluation results...")
             await pgq.run()
 
@@ -294,6 +356,14 @@ class WebSocketValidator(Neuron):
     async def _send_eval_result(self, result: EvalResultMessage):
         """Send evaluation result to the backend."""
         await self._send_message(result.model_dump())
+
+    async def _send_episode_data(self, episode_data: EpisodeDataMessage):
+        """Send episode data to the backend."""
+        await self._send_message(episode_data.model_dump())
+
+    async def _send_episode_step_data(self, step_data: EpisodeStepDataMessage):
+        """Send episode step data to the backend."""
+        await self._send_message(step_data.model_dump())
 
     async def _send_message(self, message: dict):
         """Send message to backend."""

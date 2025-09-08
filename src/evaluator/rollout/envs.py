@@ -226,7 +226,13 @@ class MultiViewImageObsWrapper(ObservationWrapper):
 
         return np.asarray(frame)
 
-    def observation(self, obs):  # type: ignore[override]
+    def capture_and_save_images(self) -> tuple[list[np.ndarray], list[str]]:
+        """Capture images from all configured camera views and optionally save them.
+
+        Returns:
+            Tuple of (images_hwc, camera_names_used) where images_hwc is a list of
+            HWC format numpy arrays and camera_names_used is the list of camera names.
+        """
         images_hwc: list[np.ndarray] = []
         camera_names_used: list[str] = []
 
@@ -257,18 +263,14 @@ class MultiViewImageObsWrapper(ObservationWrapper):
 
         # Save images to disk if enabled
         # TODO: we'd want to save images in an R2 bucket or something
-        # and we'd want to do it elsewhere, not *inside* of observation() lol
         if self._save_images and self._image_save_dir:
             self._save_images_to_disk(images_hwc, camera_names_used)
 
-        # Convert images to CHW uint8
-        images_chw = [
-            np.transpose(img, (2, 0, 1)).astype(np.uint8) for img in images_hwc
-        ]
+        return images_hwc, camera_names_used
 
+    def observation(self, obs):  # type: ignore[override]
         # For now, return base observation directly to avoid RPC message size limits
-        # Images are still saved to disk for analysis
-        # This avoids both the concatenation issue and the message size problem
+        # The capture_and_save_images method can be called separately when needed
 
         # Increment step counter
         self._step_count += 1
@@ -473,11 +475,16 @@ class EnvManager:
         if effective_render_mode == "human":
             effective_render_mode = "rgb_array"
 
+        logger.debug(
+            f"Debug wrapper conditions: enable_image_obs={env_spec.enable_image_obs}, effective_render_mode={effective_render_mode}, render_mode={env_spec.render_mode}"
+        )
+
         if (
             env_spec.enable_image_obs
             and effective_render_mode == "rgb_array"
             and env_spec.render_mode != "human"
         ):
+            logger.debug("Applying MultiViewImageObsWrapper")
             env = MultiViewImageObsWrapper(
                 env,
                 image_size=env_spec.image_size,
@@ -487,6 +494,8 @@ class EnvManager:
                 image_save_dir="data" if save_images else None,
                 submission_id=submission_id,
             )
+        else:
+            logger.warning("NOT applying MultiViewImageObsWrapper - conditions not met")
 
         # Optional human display wrapper if user requested human rendering
         if env_spec.render_mode == "human":

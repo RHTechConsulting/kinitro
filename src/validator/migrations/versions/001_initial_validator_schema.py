@@ -8,8 +8,8 @@ Create Date: 2024-01-01 00:00:00.000000
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers
@@ -27,7 +27,7 @@ def upgrade() -> None:
     result = connection.execute(
         sa.text("""
         SELECT EXISTS (
-            SELECT 1 FROM pg_type 
+            SELECT 1 FROM pg_type
             WHERE typname = 'evaluationstatus'
         )
     """)
@@ -244,8 +244,8 @@ def downgrade() -> None:
     result = connection.execute(
         sa.text("""
         SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE udt_name = 'evaluationstatus' 
+            SELECT 1 FROM information_schema.columns
+            WHERE udt_name = 'evaluationstatus'
             AND table_name NOT LIKE 'validator_%'
         )
     """)

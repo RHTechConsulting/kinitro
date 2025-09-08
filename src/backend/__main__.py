@@ -33,7 +33,12 @@ from sqlalchemy.ext.asyncio import (
 
 from core.chain import query_commitments_from_substrate
 from core.log import get_logger
-from core.messages import EvalJobMessage, EvalResultMessage
+from core.messages import (
+    EpisodeDataMessage,
+    EpisodeStepDataMessage,
+    EvalJobMessage,
+    EvalResultMessage,
+)
 from core.schemas import ChainCommitmentResponse
 
 from .config import BackendConfig
@@ -42,6 +47,8 @@ from .models import (
     BackendEvaluationResult,
     BackendState,
     Competition,
+    EpisodeData,
+    EpisodeStepData,
     MinerSubmission,
     ValidatorConnection,
 )
@@ -1079,6 +1086,165 @@ async def get_result(result_id: int):
 
 
 # ============================================================================
+# Episode Data API Endpoints
+# ============================================================================
+
+
+class EpisodeDataResponse(BaseModel):
+    """Response model for episode data."""
+
+    id: int
+    job_id: int
+    submission_id: str
+    episode_id: int
+    env_name: str
+    benchmark_name: str
+    total_reward: float
+    success: bool
+    steps: int
+    start_time: datetime
+    end_time: datetime
+    extra_metrics: Optional[dict]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class EpisodeStepDataResponse(BaseModel):
+    """Response model for episode step data."""
+
+    id: int
+    episode_id: int
+    submission_id: str
+    step: int
+    action: dict
+    reward: float
+    done: bool
+    truncated: bool
+    observation_refs: dict
+    info: Optional[dict]
+    timestamp: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@app.get("/episodes", response_model=List[EpisodeDataResponse])
+async def get_episodes(
+    job_id: Optional[int] = Query(None, description="Filter by job ID"),
+    submission_id: Optional[str] = Query(None, description="Filter by submission ID"),
+    success: Optional[bool] = Query(None, description="Filter by success status"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Get episode data with optional filters."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    async with backend_service.async_session() as session:
+        query = select(EpisodeData)
+
+        # Apply filters
+        if job_id is not None:
+            query = query.where(EpisodeData.job_id == job_id)
+        if submission_id is not None:
+            query = query.where(EpisodeData.submission_id == submission_id)
+        if success is not None:
+            query = query.where(EpisodeData.success == success)
+
+        # Apply pagination
+        query = (
+            query.limit(limit).offset(offset).order_by(EpisodeData.created_at.desc())
+        )
+
+        result = await session.execute(query)
+        episodes = result.scalars().all()
+
+        return [EpisodeDataResponse.model_validate(ep) for ep in episodes]
+
+
+@app.get("/episodes/{episode_id}", response_model=EpisodeDataResponse)
+async def get_episode(episode_id: int):
+    """Get a specific episode by ID."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(
+            select(EpisodeData).where(EpisodeData.id == episode_id)
+        )
+        episode = result.scalar_one_or_none()
+
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+
+        return EpisodeDataResponse.model_validate(episode)
+
+
+@app.get("/episodes/{episode_id}/steps", response_model=List[EpisodeStepDataResponse])
+async def get_episode_steps(
+    episode_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Get all steps for a specific episode."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    async with backend_service.async_session() as session:
+        # Check episode exists
+        episode_result = await session.execute(
+            select(EpisodeData).where(EpisodeData.id == episode_id)
+        )
+        if not episode_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Episode not found")
+
+        # Get steps
+        query = (
+            select(EpisodeStepData)
+            .where(EpisodeStepData.episode_id == episode_id)
+            .order_by(EpisodeStepData.step)
+            .limit(limit)
+            .offset(offset)
+        )
+
+        result = await session.execute(query)
+        steps = result.scalars().all()
+
+        return [EpisodeStepDataResponse.model_validate(step) for step in steps]
+
+
+@app.get("/steps", response_model=List[EpisodeStepDataResponse])
+async def get_steps(
+    submission_id: Optional[str] = Query(None, description="Filter by submission ID"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Get episode steps with optional filters."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    async with backend_service.async_session() as session:
+        query = select(EpisodeStepData)
+
+        # Apply filters
+        if submission_id is not None:
+            query = query.where(EpisodeStepData.submission_id == submission_id)
+
+        # Apply pagination
+        query = query.limit(limit).offset(offset).order_by(EpisodeStepData.step)
+
+        result = await session.execute(query)
+        steps = result.scalars().all()
+
+        return [EpisodeStepDataResponse.model_validate(step) for step in steps]
+
+
+# ============================================================================
 # WebSocket Endpoint for Validators
 # ============================================================================
 
@@ -1248,6 +1414,92 @@ async def validator_websocket(websocket: WebSocket):
                                     "status": "received",
                                 }
                             )
+                        )
+
+            elif message_type == "episode_data":
+                # Handle episode data
+                episode_msg = EpisodeDataMessage(**message)
+
+                if not backend_service.async_session:
+                    logger.error("Database not initialized")
+                    continue
+
+                async with backend_service.async_session() as session:
+                    # Create episode record
+                    episode_record = EpisodeData(
+                        id=next(backend_service.id_generator),
+                        job_id=episode_msg.job_id,
+                        submission_id=episode_msg.submission_id,
+                        task_id=episode_msg.task_id,
+                        episode_id=episode_msg.episode_id,
+                        env_name=episode_msg.env_name,
+                        benchmark_name=episode_msg.benchmark_name,
+                        total_reward=episode_msg.total_reward,
+                        success=episode_msg.success,
+                        steps=episode_msg.steps,
+                        start_time=datetime.fromisoformat(episode_msg.start_time)
+                        if isinstance(episode_msg.start_time, str)
+                        else episode_msg.start_time,
+                        end_time=datetime.fromisoformat(episode_msg.end_time)
+                        if isinstance(episode_msg.end_time, str)
+                        else episode_msg.end_time,
+                        extra_metrics=episode_msg.extra_metrics,
+                    )
+
+                    session.add(episode_record)
+                    await session.commit()
+
+                    logger.info(
+                        f"Stored episode data from {validator_hotkey} for episode {episode_msg.episode_id}"
+                    )
+
+            elif message_type == "episode_step_data":
+                # Handle episode step data
+                step_msg = EpisodeStepDataMessage(**message)
+
+                if not backend_service.async_session:
+                    logger.error("Database not initialized")
+                    continue
+
+                async with backend_service.async_session() as session:
+                    # Find the episode record
+                    episode_result = await session.execute(
+                        select(EpisodeData).where(
+                            EpisodeData.submission_id == step_msg.submission_id,
+                            EpisodeData.episode_id == step_msg.episode_id,
+                            EpisodeData.task_id == step_msg.task_id,
+                        )
+                    )
+                    episode_record = episode_result.scalar_one_or_none()
+
+                    if episode_record:
+                        # Create step record
+                        step_record = EpisodeStepData(
+                            id=next(backend_service.id_generator),
+                            episode_id=episode_record.id,  # Use the database episode ID
+                            submission_id=step_msg.submission_id,
+                            task_id=step_msg.task_id,
+                            step=step_msg.step,
+                            action=step_msg.action,
+                            reward=step_msg.reward,
+                            done=step_msg.done,
+                            truncated=step_msg.truncated,
+                            observation_refs=step_msg.observation_refs,
+                            info=step_msg.info,
+                            timestamp=datetime.fromisoformat(step_msg.step_timestamp)
+                            if isinstance(step_msg.step_timestamp, str)
+                            else step_msg.step_timestamp,
+                        )
+
+                        session.add(step_record)
+                        await session.commit()
+
+                        logger.info(
+                            f"Stored step data from {validator_hotkey} for episode {step_msg.episode_id}, step {step_msg.step}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Episode not found for step data: submission {step_msg.submission_id}, episode {step_msg.episode_id}"
                         )
 
     except WebSocketDisconnect:

@@ -6,7 +6,6 @@ Random action agent that implements AgentInterface for testing.
 import gymnasium as gym
 import numpy as np
 import torch
-
 from kinitro_eval.agent_interface import AgentInterface
 
 
