@@ -217,6 +217,7 @@ class BackendEvaluationResult(TimestampMixin, Base):
     # Result details
     miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
     competition_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    env_provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     benchmark: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
 
     # Scores and metrics

@@ -229,6 +229,7 @@ def upgrade() -> None:
         sa.Column("validator_hotkey", sa.String(length=48), nullable=False),
         sa.Column("miner_hotkey", sa.String(length=48), nullable=False),
         sa.Column("competition_id", sa.String(length=64), nullable=False),
+        sa.Column("env_provider", sa.String(length=64), nullable=False),
         sa.Column("benchmark", sa.String(length=128), nullable=False),
         sa.Column("score", sa.Float(), nullable=False),
         sa.Column("success_rate", sa.Float(), nullable=True),

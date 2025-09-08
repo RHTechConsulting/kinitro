@@ -1209,6 +1209,7 @@ async def validator_websocket(websocket: WebSocket):
                             validator_hotkey=validator_hotkey,
                             miner_hotkey=result_msg.miner_hotkey,
                             competition_id=result_msg.competition_id,
+                            env_provider=result_msg.env_provider,
                             benchmark=result_msg.benchmark_name,
                             score=result_msg.score,
                             success_rate=result_msg.success_rate,
