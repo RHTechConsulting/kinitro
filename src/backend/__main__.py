@@ -590,11 +590,9 @@ class BackendService:
         env_config = job.config if job.config else {}
 
         job_msg = EvalJobMessage(
-            # TODO: yuck.
-            job_id=int(str(job.id)),
+            job_id=job.id,
             competition_id=job.competition_id,
-            # TODO: yuck.
-            submission_id=int(str(job.submission_id)),
+            submission_id=job.submission_id,
             miner_hotkey=job.miner_hotkey,
             hf_repo_id=job.hf_repo_id,
             env_provider=job.env_provider,
@@ -622,17 +620,18 @@ class BackendService:
                 del self.validator_connections[conn_id]
 
         # Update job stats
-        if not self.async_session:
-            logger.error("Database not initialized")
-            return
-        async with self.async_session() as session:
-            job_result = await session.execute(
-                select(BackendEvaluationJob).where(BackendEvaluationJob.id == job.id)
-            )
-            db_job = job_result.scalar_one()
-            db_job.broadcast_time = datetime.now(timezone.utc)
-            db_job.validators_sent = broadcast_count
-            await session.commit()
+        # TODO: purge?
+        # if not self.async_session:
+        #     logger.error("Database not initialized")
+        #     return
+        # async with self.async_session() as session:
+        #     job_result = await session.execute(
+        #         select(BackendEvaluationJob).where(BackendEvaluationJob.id == job.id)
+        #     )
+        #     db_job = job_result.scalar_one()
+        #     db_job.broadcast_time = datetime.now(timezone.utc)
+        #     db_job.validators_sent = broadcast_count
+        #     await session.commit()
 
         logger.info(f"Broadcasted job {job.id} to {broadcast_count} validators")
 

@@ -12,14 +12,14 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
-
-from validator.db.models import Base
+from sqlmodel import SQLModel
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# Import the validator models
+# Import the validator models to ensure they're registered with SQLModel
+from validator.db import models  # noqa: E402, F401
 
 # this is the Alembic Config object
 config = context.config
@@ -29,7 +29,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Add your model's MetaData object here for 'autogenerate' support
-target_metadata = Base.metadata
+# Use SQLModel's metadata which includes all tables
+target_metadata = SQLModel.metadata
 
 
 def get_database_url():
@@ -41,7 +42,7 @@ def get_database_url():
 
     # Try to read from validator config file directly
     try:
-        import toml
+        import toml  # noqa: PLC0415
 
         config_path = project_root / "config" / "validator.toml"
         if config_path.exists():

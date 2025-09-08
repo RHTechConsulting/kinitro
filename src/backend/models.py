@@ -1,76 +1,74 @@
 """
-SQLAlchemy models for Kinitro Backend database.
+SQLModel models for Kinitro Backend database.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
-    Boolean,
     CheckConstraint,
-    DateTime,
-    Enum,
-    Float,
     ForeignKey,
     Index,
-    Integer,
-    String,
-    Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import (
+    DateTime as SADateTime,
+)
+from sqlalchemy import (
+    String as SAString,
+)
+from sqlalchemy import (
+    Text as SAText,
+)
 from sqlalchemy.sql import func
+from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 from core.db.models import EvaluationStatus, TimestampMixin
 
-
-class Base(DeclarativeBase):
-    pass
-
-
 # Type aliases for consistency
-SnowflakeColumn = BigInteger  # SQLAlchemy column type for snowflake IDs
-SS58Address = String(48)
+SS58Address = str  # Will be constrained to 48 chars in field definition
 
 
-class Competition(TimestampMixin, Base):
+class Competition(TimestampMixin, SQLModel, table=True):
     """Competition with benchmarks and point allocation."""
 
     __tablename__ = "competitions"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    id: str = Field(primary_key=True, max_length=64)
+    name: str = Field(max_length=256, nullable=False, unique=True)
+    description: Optional[str] = Field(
+        default=None, sa_column=Column(SAText, nullable=True)
+    )
 
     # Store benchmarks as JSON array: ["benchmark_a", "benchmark_b"]
-    benchmarks: Mapped[dict] = mapped_column(JSON, nullable=False)
+    benchmarks: dict = Field(sa_column=Column(JSON, nullable=False))
 
     # Points allocated to this competition for reward distribution
-    points: Mapped[int] = mapped_column(nullable=False)
+    points: int = Field(nullable=False)
 
     # Competition status
-    active: Mapped[bool] = mapped_column(
-        nullable=False, server_default="true", index=True
+    active: bool = Field(
+        default=True,
+        nullable=False,
+        index=True,
+        sa_column_kwargs={"server_default": "true"},
     )
 
     # Start and end times for the competition
-    start_time: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    start_time: Optional[datetime] = Field(
+        default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
     )
-    end_time: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    end_time: Optional[datetime] = Field(
+        default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
     )
 
     # Relationships
-    submissions = relationship(
-        "MinerSubmission", back_populates="competition", cascade="all, delete-orphan"
+    submissions: List["MinerSubmission"] = Relationship(
+        back_populates="competition", cascade_delete=True
     )
-    evaluation_jobs = relationship(
-        "BackendEvaluationJob",
-        back_populates="competition",
-        cascade="all, delete-orphan",
+    evaluation_jobs: List["BackendEvaluationJob"] = Relationship(
+        back_populates="competition", cascade_delete=True
     )
 
     __table_args__ = (
@@ -84,40 +82,42 @@ class Competition(TimestampMixin, Base):
     )
 
 
-class MinerSubmission(TimestampMixin, Base):
+class MinerSubmission(TimestampMixin, SQLModel, table=True):
     """Record of a miner's submission to a competition."""
 
     __tablename__ = "miner_submissions"
 
-    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
 
     # Miner and competition info
-    miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
-    competition_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("competitions.id"), nullable=False, index=True
+    miner_hotkey: str = Field(max_length=48, nullable=False, index=True)
+    competition_id: str = Field(
+        sa_column=Column(
+            SAString(64), ForeignKey("competitions.id"), nullable=False, index=True
+        )
     )
 
     # Submission details from chain commitment
-    hf_repo_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    version: Mapped[str] = mapped_column(String(32), nullable=False)
-    commitment_block: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, index=True
+    hf_repo_id: str = Field(max_length=256, nullable=False)
+    version: str = Field(max_length=32, nullable=False)
+    commitment_block: int = Field(
+        sa_column=Column(BigInteger, nullable=False, index=True)
     )
-    commitment_hash: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True
+    commitment_hash: Optional[str] = Field(
+        default=None, max_length=128
     )  # Optional hash of the commitment
 
     # Submission timestamp (when we processed it)
-    submission_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    submission_time: datetime = Field(
+        sa_column=Column(
+            SADateTime(timezone=True), nullable=False, server_default=func.now()
+        )
     )
 
     # Relationships
-    competition = relationship("Competition", back_populates="submissions")
-    evaluation_jobs = relationship(
-        "BackendEvaluationJob",
-        back_populates="submission",
-        cascade="all, delete-orphan",
+    competition: Optional["Competition"] = Relationship(back_populates="submissions")
+    evaluation_jobs: List["BackendEvaluationJob"] = Relationship(
+        back_populates="submission", cascade_delete=True
     )
 
     __table_args__ = (
@@ -134,63 +134,73 @@ class MinerSubmission(TimestampMixin, Base):
     )
 
 
-class BackendEvaluationJob(TimestampMixin, Base):
+class BackendEvaluationJob(TimestampMixin, SQLModel, table=True):
     """Evaluation job created by backend and sent to validators."""
 
     __tablename__ = "backend_evaluation_jobs"
 
-    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
     # Link to submission and competition
-    submission_id: Mapped[SnowflakeColumn] = mapped_column(
-        SnowflakeColumn, ForeignKey("miner_submissions.id"), nullable=False, index=True
+    submission_id: int = Field(
+        sa_column=Column(
+            BigInteger, ForeignKey("miner_submissions.id"), nullable=False, index=True
+        )
     )
-    competition_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("competitions.id"), nullable=False, index=True
+    competition_id: str = Field(
+        sa_column=Column(
+            SAString(64), ForeignKey("competitions.id"), nullable=False, index=True
+        )
     )
 
     # Job details
-    miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
-    hf_repo_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    env_provider: Mapped[str] = mapped_column(String(64), nullable=False)
-    benchmark_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    miner_hotkey: str = Field(max_length=48, nullable=False, index=True)
+    hf_repo_id: str = Field(max_length=256, nullable=False)
+    env_provider: str = Field(max_length=64, nullable=False)
+    benchmark_name: str = Field(max_length=128, nullable=False)
+    config: dict = Field(sa_column=Column(JSON, nullable=False))
 
     # Relationships
-    submission = relationship("MinerSubmission", back_populates="evaluation_jobs")
-    competition = relationship("Competition", back_populates="evaluation_jobs")
-    results = relationship(
-        "BackendEvaluationResult", back_populates="job", cascade="all, delete-orphan"
+    submission: Optional["MinerSubmission"] = Relationship(
+        back_populates="evaluation_jobs"
     )
-    status_updates = relationship(
-        "BackendEvaluationJobStatus", back_populates="job", cascade="all, delete-orphan"
+    competition: Optional["Competition"] = Relationship(
+        back_populates="evaluation_jobs"
+    )
+    results: List["BackendEvaluationResult"] = Relationship(
+        back_populates="job", cascade_delete=True
+    )
+    status_updates: List["BackendEvaluationJobStatus"] = Relationship(
+        back_populates="job", cascade_delete=True
     )
 
     __table_args__ = (Index("ix_backend_jobs_miner", "miner_hotkey"),)
 
 
-class BackendEvaluationJobStatus(TimestampMixin, Base):
+class BackendEvaluationJobStatus(TimestampMixin, SQLModel, table=True):
     """Track status updates for backend evaluation jobs."""
 
     __tablename__ = "backend_evaluation_job_status"
 
-    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
 
-    job_id: Mapped[SnowflakeColumn] = mapped_column(
-        SnowflakeColumn,
-        ForeignKey("backend_evaluation_jobs.id"),
-        nullable=False,
-        index=True,
+    job_id: int = Field(
+        sa_column=Column(
+            BigInteger,
+            ForeignKey("backend_evaluation_jobs.id"),
+            nullable=False,
+            index=True,
+        )
     )
-    validator_hotkey: Mapped[str] = mapped_column(
-        SS58Address, nullable=False, index=True
+    validator_hotkey: str = Field(
+        max_length=48, nullable=False, index=True
     )  # Validator reporting the status
-    status: Mapped[EvaluationStatus] = mapped_column(
-        Enum(EvaluationStatus), nullable=False, index=True
-    )
-    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: EvaluationStatus = Field(nullable=False, index=True)
+    detail: Optional[str] = Field(default=None, sa_column=Column(SAText, nullable=True))
 
     # Relationship
-    job = relationship("BackendEvaluationJob", back_populates="status_updates")
+    job: Optional["BackendEvaluationJob"] = Relationship(
+        back_populates="status_updates"
+    )
 
     __table_args__ = (
         Index("ix_backend_job_status_job", "job_id"),
@@ -198,48 +208,52 @@ class BackendEvaluationJobStatus(TimestampMixin, Base):
     )
 
 
-class BackendEvaluationResult(TimestampMixin, Base):
+class BackendEvaluationResult(TimestampMixin, SQLModel, table=True):
     """Evaluation results received from validators."""
 
     __tablename__ = "backend_evaluation_results"
 
-    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
 
     # Job and validator info
-    job_id: Mapped[SnowflakeColumn] = mapped_column(
-        SnowflakeColumn,
-        ForeignKey("backend_evaluation_jobs.id"),
-        nullable=False,
-        index=True,
+    job_id: int = Field(
+        sa_column=Column(
+            BigInteger,
+            ForeignKey("backend_evaluation_jobs.id"),
+            nullable=False,
+            index=True,
+        )
     )
-    validator_hotkey = mapped_column(SS58Address, nullable=False, index=True)
+    validator_hotkey: str = Field(max_length=48, nullable=False, index=True)
 
     # Result details
-    miner_hotkey = mapped_column(SS58Address, nullable=False, index=True)
-    competition_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    env_provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    benchmark: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    miner_hotkey: str = Field(max_length=48, nullable=False, index=True)
+    competition_id: str = Field(max_length=64, nullable=False, index=True)
+    env_provider: str = Field(max_length=64, nullable=False, index=True)
+    benchmark: str = Field(max_length=128, nullable=False, index=True)
 
     # Scores and metrics
-    score: Mapped[float] = mapped_column(Float, nullable=False)
-    success_rate: Mapped[float] = mapped_column(Float, nullable=True)
-    avg_reward: Mapped[float] = mapped_column(Float, nullable=True)
-    total_episodes: Mapped[int] = mapped_column(Integer, nullable=True)
+    score: float = Field(nullable=False)
+    success_rate: Optional[float] = Field(default=None)
+    avg_reward: Optional[float] = Field(default=None)
+    total_episodes: Optional[int] = Field(default=None)
 
     # Additional data
-    logs: Mapped[str] = mapped_column(Text, nullable=True)
-    error: Mapped[str] = mapped_column(Text, nullable=True)
-    extra_data: Mapped[dict] = mapped_column(
-        JSON, nullable=True
+    logs: Optional[str] = Field(default=None, sa_column=Column(SAText, nullable=True))
+    error: Optional[str] = Field(default=None, sa_column=Column(SAText, nullable=True))
+    extra_data: Optional[dict] = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
     )  # Additional metrics/data
 
     # Timing
-    result_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    result_time: datetime = Field(
+        sa_column=Column(
+            SADateTime(timezone=True), nullable=False, server_default=func.now()
+        )
     )
 
     # Relationships
-    job = relationship("BackendEvaluationJob", back_populates="results")
+    job: Optional["BackendEvaluationJob"] = Relationship(back_populates="results")
 
     __table_args__ = (
         # Prevent duplicate results from same validator for same job/benchmark
@@ -263,46 +277,55 @@ class BackendEvaluationResult(TimestampMixin, Base):
     )
 
 
-class ValidatorConnection(TimestampMixin, Base):
+class ValidatorConnection(TimestampMixin, SQLModel, table=True):
     """Track validator connections and statistics."""
 
     __tablename__ = "validator_connections"
 
-    id: Mapped[SnowflakeColumn] = mapped_column(SnowflakeColumn, primary_key=True)
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
 
-    validator_hotkey: Mapped[str] = mapped_column(
-        SS58Address, nullable=False, unique=True, index=True
+    validator_hotkey: str = Field(
+        max_length=48, nullable=False, unique=True, index=True
     )
     # TODO: better naming?
-    connection_id: Mapped[str] = mapped_column(
-        String(128), nullable=False, index=True
+    connection_id: str = Field(
+        max_length=128, nullable=False, index=True
     )  # IP:port or other identifier
 
     # Connection tracking
-    first_connected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    first_connected_at: datetime = Field(
+        sa_column=Column(
+            SADateTime(timezone=True), nullable=False, server_default=func.now()
+        )
     )
-    last_connected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    last_connected_at: datetime = Field(
+        sa_column=Column(
+            SADateTime(timezone=True), nullable=False, server_default=func.now()
+        )
     )
-    last_heartbeat: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    last_heartbeat: datetime = Field(
+        sa_column=Column(
+            SADateTime(timezone=True), nullable=False, server_default=func.now()
+        )
     )
 
     # Statistics
-    total_jobs_sent: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
+    total_jobs_sent: int = Field(
+        default=0, nullable=False, sa_column_kwargs={"server_default": "0"}
     )
-    total_results_received: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
+    total_results_received: int = Field(
+        default=0, nullable=False, sa_column_kwargs={"server_default": "0"}
     )
-    total_errors: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
+    total_errors: int = Field(
+        default=0, nullable=False, sa_column_kwargs={"server_default": "0"}
     )
 
     # Current status
-    is_connected: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="true", index=True
+    is_connected: bool = Field(
+        default=True,
+        nullable=False,
+        index=True,
+        sa_column_kwargs={"server_default": "true"},
     )
 
     __table_args__ = (
@@ -316,25 +339,27 @@ class ValidatorConnection(TimestampMixin, Base):
     )
 
 
-class BackendState(TimestampMixin, Base):
+class BackendState(TimestampMixin, SQLModel, table=True):
     """Backend service state for persistence across restarts."""
 
     __tablename__ = "backend_state"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: int = Field(primary_key=True)
 
     # Chain monitoring state
-    last_seen_block: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default="0"
+    last_seen_block: int = Field(
+        default=0, sa_column=Column(BigInteger, nullable=False, server_default="0")
     )
-    last_chain_scan: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    last_chain_scan: Optional[datetime] = Field(
+        default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
     )
 
     # Service info
-    service_version: Mapped[str] = mapped_column(String(32), nullable=True)
-    service_start_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    service_version: Optional[str] = Field(default=None, max_length=32)
+    service_start_time: datetime = Field(
+        sa_column=Column(
+            SADateTime(timezone=True), nullable=False, server_default=func.now()
+        )
     )
 
     __table_args__ = (

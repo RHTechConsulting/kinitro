@@ -1,19 +1,19 @@
 """
 Shared message models for backend-validator communication in Kinitro.
 
-These Pydantic models define the message formats used for WebSocket
+These SQLModel models define the message formats used for WebSocket
 communication between the Kinitro Backend and Validators.
 """
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from sqlmodel import Field, SQLModel
 
 from core.db.models import EvaluationStatus, SnowflakeId
 
 
-class EvalJobMessage(BaseModel):
+class EvalJobMessage(SQLModel):
     """Message for broadcasting evaluation jobs from backend to validators."""
 
     message_type: str = "eval_job"
@@ -35,7 +35,7 @@ class EvalJobMessage(BaseModel):
         return cls.model_validate_json(data)
 
 
-class EvalResultMessage(BaseModel):
+class EvalResultMessage(SQLModel):
     """Message for sending evaluation results from validators to backend."""
 
     message_type: str = "eval_result"
@@ -56,7 +56,7 @@ class EvalResultMessage(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class ValidatorRegisterMessage(BaseModel):
+class ValidatorRegisterMessage(SQLModel):
     """Message for validator registration with backend."""
 
     message_type: str = "register"
@@ -64,7 +64,7 @@ class ValidatorRegisterMessage(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class HeartbeatMessage(BaseModel):
+class HeartbeatMessage(SQLModel):
     """Message for validator heartbeat."""
 
     message_type: str = "heartbeat"
@@ -72,14 +72,14 @@ class HeartbeatMessage(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class HeartbeatAckMessage(BaseModel):
+class HeartbeatAckMessage(SQLModel):
     """Acknowledgment message for heartbeat."""
 
     message_type: str = "heartbeat_ack"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class RegistrationAckMessage(BaseModel):
+class RegistrationAckMessage(SQLModel):
     """Acknowledgment message for validator registration."""
 
     message_type: str = "registration_ack"
@@ -87,7 +87,7 @@ class RegistrationAckMessage(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class ResultAckMessage(BaseModel):
+class ResultAckMessage(SQLModel):
     """Acknowledgment message for result submission."""
 
     message_type: str = "result_ack"
@@ -96,7 +96,7 @@ class ResultAckMessage(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class ErrorMessage(BaseModel):
+class ErrorMessage(SQLModel):
     """Error message for communication issues."""
 
     message_type: str = "error"

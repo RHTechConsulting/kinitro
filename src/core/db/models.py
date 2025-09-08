@@ -2,18 +2,13 @@ import enum
 from datetime import datetime
 
 from pydantic import Field
-from sqlalchemy import (
-    DateTime,
-    func,
-)
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import text
+from sqlalchemy.sql import func
+from sqlmodel import Field as SQLModelField
+from sqlmodel import SQLModel
 from typing_extensions import Annotated
 
 SnowflakeId = Annotated[int, Field(ge=0, le=(2**63 - 1))]
-
-# Base class for all validator models
-Base = declarative_base()
 
 
 class EvaluationStatus(enum.Enum):
@@ -28,15 +23,19 @@ class EvaluationStatus(enum.Enum):
     TIMEOUT = "TIMEOUT"
 
 
-class TimestampMixin:
+class TimestampMixin(SQLModel):
     """Mixin for created/updated timestamps."""
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+    created_at: datetime = SQLModelField(
+        default=None,
         nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
+        sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP"), "index": True},
+    )
+    updated_at: datetime = SQLModelField(
+        default=None,
+        nullable=False,
+        sa_column_kwargs={
+            "server_default": text("CURRENT_TIMESTAMP"),
+            "onupdate": func.now(),
+        },
     )

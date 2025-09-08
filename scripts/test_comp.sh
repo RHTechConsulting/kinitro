@@ -1,7 +1,7 @@
 curl -X POST "http://localhost:8080/competitions" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "mt1 baby",
+    "name": "mt1",
     "benchmarks": [
         {
             "provider": "metaworld",
