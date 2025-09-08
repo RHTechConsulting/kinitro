@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from core.chain import query_commitments_from_substrate
+from core.db.models import EvaluationStatus
 from core.log import get_logger
 from core.messages import (
     EpisodeDataMessage,
@@ -44,6 +45,7 @@ from core.schemas import ChainCommitmentResponse
 from .config import BackendConfig
 from .models import (
     BackendEvaluationJob,
+    BackendEvaluationJobStatus,
     BackendEvaluationResult,
     BackendState,
     Competition,
@@ -161,6 +163,21 @@ class EvaluationResultResponse(BaseModel):
     total_episodes: Optional[int]
     error: Optional[str]
     result_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class JobStatusResponse(BaseModel):
+    """Response model for job status data."""
+
+    id: int
+    job_id: int
+    validator_hotkey: str
+    status: str
+    detail: Optional[str]
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
@@ -588,6 +605,45 @@ class BackendService:
         except Exception as e:
             logger.error(f"Failed to process commitment: {e}")
 
+    async def _update_job_status(
+        self,
+        job_id: int,
+        validator_hotkey: str,
+        status: EvaluationStatus,
+        detail: str = None,
+    ):
+        """Update job status for a specific validator."""
+        if not self.async_session:
+            logger.error("Database not initialized")
+            return
+
+        try:
+            async with self.async_session() as session:
+                # Create new status record
+                status_record = BackendEvaluationJobStatus(
+                    id=next(self.id_generator),
+                    job_id=job_id,
+                    validator_hotkey=validator_hotkey,
+                    status=status,
+                    detail=detail,
+                )
+                session.add(status_record)
+                await session.commit()
+
+                logger.debug(
+                    f"Updated job {job_id} status to {status.value} for validator {validator_hotkey}"
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to update job status: {e}")
+
+    async def _update_job_status_for_validators(
+        self, job_id: int, status: EvaluationStatus, detail: str = None
+    ):
+        """Update job status for all connected validators."""
+        for validator_hotkey in self.validator_connections.values():
+            await self._update_job_status(job_id, validator_hotkey, status, detail)
+
     async def _broadcast_job(self, job: BackendEvaluationJob):
         """Broadcast job to connected validators."""
         if not self.active_connections:
@@ -639,6 +695,12 @@ class BackendService:
         #     db_job.broadcast_time = datetime.now(timezone.utc)
         #     db_job.validators_sent = broadcast_count
         #     await session.commit()
+
+        # Update job status to QUEUED for all validators that received the job
+        if broadcast_count > 0 and self.async_session:
+            await self._update_job_status_for_validators(
+                job.id, EvaluationStatus.QUEUED, "Job queued to validators"
+            )
 
         logger.info(f"Broadcasted job {job.id} to {broadcast_count} validators")
 
@@ -1023,6 +1085,77 @@ async def get_job(job_id: int):
         return JobResponse.model_validate(job)
 
 
+@app.get("/jobs/{job_id}/status", response_model=List[JobStatusResponse])
+async def get_job_status(job_id: int):
+    """Get status updates for a specific job."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    async with backend_service.async_session() as session:
+        # Check if job exists
+        job_result = await session.execute(
+            select(BackendEvaluationJob).where(BackendEvaluationJob.id == job_id)
+        )
+        job = job_result.scalar_one_or_none()
+
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        # Get status updates
+        status_result = await session.execute(
+            select(BackendEvaluationJobStatus)
+            .where(BackendEvaluationJobStatus.job_id == job_id)
+            .order_by(BackendEvaluationJobStatus.created_at.desc())
+        )
+        status_updates = status_result.scalars().all()
+
+        return [JobStatusResponse.model_validate(status) for status in status_updates]
+
+
+@app.get("/job-status", response_model=List[JobStatusResponse])
+async def list_job_status(
+    job_id: Optional[int] = Query(None, description="Filter by job ID"),
+    validator_hotkey: Optional[str] = Query(
+        None, description="Filter by validator hotkey"
+    ),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Get job status updates with optional filters."""
+    if not backend_service.async_session:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    async with backend_service.async_session() as session:
+        query = select(BackendEvaluationJobStatus)
+
+        # Apply filters
+        if job_id is not None:
+            query = query.where(BackendEvaluationJobStatus.job_id == job_id)
+        if validator_hotkey is not None:
+            query = query.where(
+                BackendEvaluationJobStatus.validator_hotkey == validator_hotkey
+            )
+        if status is not None:
+            # Convert string to enum
+            try:
+                status_enum = EvaluationStatus(status.upper())
+                query = query.where(BackendEvaluationJobStatus.status == status_enum)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+        # Apply pagination and ordering
+        query = (
+            query.order_by(BackendEvaluationJobStatus.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+
+        result = await session.execute(query)
+        status_updates = result.scalars().all()
+
+        return [JobStatusResponse.model_validate(status) for status in status_updates]
+
+
 # Result endpoints
 @app.get("/results", response_model=List[EvaluationResultResponse])
 async def list_results(
@@ -1401,6 +1534,22 @@ async def validator_websocket(websocket: WebSocket):
 
                         await session.commit()
 
+                        # Update job status based on result
+                        if result_msg.error:
+                            await backend_service._update_job_status(
+                                result_msg.job_id,
+                                validator_hotkey,
+                                EvaluationStatus.FAILED,
+                                f"Evaluation failed: {result_msg.error}",
+                            )
+                        else:
+                            await backend_service._update_job_status(
+                                result_msg.job_id,
+                                validator_hotkey,
+                                EvaluationStatus.COMPLETED,
+                                f"Evaluation completed with score {result_msg.score}",
+                            )
+
                         logger.info(
                             f"Stored result from {validator_hotkey} for job {result_msg.job_id}"
                         )
@@ -1448,6 +1597,28 @@ async def validator_websocket(websocket: WebSocket):
 
                     session.add(episode_record)
                     await session.commit()
+
+                    # Check if this is the first episode for this job-validator combination
+                    # If so, update status to RUNNING
+                    status_result = await session.execute(
+                        select(BackendEvaluationJobStatus).where(
+                            BackendEvaluationJobStatus.job_id == episode_msg.job_id,
+                            BackendEvaluationJobStatus.validator_hotkey
+                            == validator_hotkey,
+                            BackendEvaluationJobStatus.status
+                            == EvaluationStatus.RUNNING,
+                        )
+                    )
+                    existing_running_status = status_result.scalar_one_or_none()
+
+                    if not existing_running_status:
+                        # First episode data received, mark as RUNNING
+                        await backend_service._update_job_status(
+                            episode_msg.job_id,
+                            validator_hotkey,
+                            EvaluationStatus.RUNNING,
+                            f"Started processing episodes (episode {episode_msg.episode_id})",
+                        )
 
                     logger.info(
                         f"Stored episode data from {validator_hotkey} for episode {episode_msg.episode_id}"
