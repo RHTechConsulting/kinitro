@@ -97,11 +97,3 @@ class BackendConfig(Config):
             help="Seconds between chain sync operations",
             default=self.settings.get("chain_sync_interval", 30),
         )
-
-        # miner filtering
-        self._parser.add_argument(
-            "--min-stake-threshold",
-            type=float,
-            help="Minimum stake threshold for miners to be queried",
-            default=self.settings.get("min_stake_threshold", 0.0),
-        )

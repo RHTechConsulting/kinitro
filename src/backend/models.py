@@ -3,7 +3,7 @@ SQLModel models for Kinitro Backend database.
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -24,12 +24,143 @@ from sqlalchemy import (
 from sqlalchemy.sql import func
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
-from core.db.models import EvaluationStatus, TimestampMixin
+from core.db.models import EvaluationStatus, SnowflakeId, TimestampMixin
 
 # Type aliases for consistency
 SS58Address = str  # Will be constrained to 48 chars in field definition
 
 
+# Models for API requests/responses
+class CompetitionCreateRequest(SQLModel):
+    """Request model for creating a competition."""
+
+    name: str
+    description: Optional[str] = None
+    benchmarks: List[dict]
+    points: int = Field(gt=0)
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+
+
+class CompetitionResponse(SQLModel):
+    """Response model for competition data."""
+
+    id: str
+    name: str
+    description: Optional[str]
+    benchmarks: List[dict]
+    points: int
+    active: bool
+    start_time: Optional[datetime]
+    end_time: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ValidatorInfoResponse(SQLModel):
+    """Response model for validator information."""
+
+    validator_hotkey: str
+    connection_id: str
+    is_connected: bool
+    first_connected_at: datetime
+    last_heartbeat: datetime
+    total_jobs_sent: int
+    total_results_received: int
+    total_errors: int
+
+    class Config:
+        from_attributes = True
+
+
+class MinerSubmissionResponse(SQLModel):
+    """Response model for miner submission data."""
+
+    id: SnowflakeId
+    miner_hotkey: str
+    competition_id: str
+    hf_repo_id: str
+    version: str
+    commitment_block: int
+    submission_time: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class JobResponse(SQLModel):
+    """Response model for job data."""
+
+    id: SnowflakeId
+    job_id: str
+    submission_id: int
+    competition_id: str
+    miner_hotkey: str
+    hf_repo_id: str
+    env_provider: str
+    benchmark_name: str
+    config: dict
+    broadcast_time: Optional[datetime]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class EvaluationResultResponse(SQLModel):
+    """Response model for evaluation result data."""
+
+    id: SnowflakeId
+    job_id: str
+    validator_hotkey: str
+    miner_hotkey: str
+    competition_id: str
+    benchmark: str
+    score: float
+    success_rate: Optional[float]
+    avg_reward: Optional[float]
+    total_episodes: Optional[int]
+    error: Optional[str]
+    result_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class JobStatusResponse(SQLModel):
+    """Response model for job status data."""
+
+    id: SnowflakeId
+    job_id: SnowflakeId
+    validator_hotkey: str
+    status: EvaluationStatus
+    detail: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BackendStatsResponse(SQLModel):
+    """Response model for backend statistics."""
+
+    total_competitions: int
+    active_competitions: int
+    total_points: int
+    connected_validators: int
+    total_submissions: int
+    total_jobs: int
+    total_results: int
+    last_seen_block: int
+    competition_percentages: Dict[str, float]
+
+
+# Models for DB tables
 class Competition(TimestampMixin, SQLModel, table=True):
     """Competition with benchmarks and point allocation."""
 
