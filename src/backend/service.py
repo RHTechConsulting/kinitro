@@ -322,10 +322,15 @@ class BackendService:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def _get_latest_block(self) -> int:
-        """Get latest block from chain."""
+        """Get latest block from chain.
+
+        Returns:
+            int: The latest block number, or -1 if an error occurred.
+                 Block 0 is a valid genesis block, so -1 indicates failure.
+        """
         try:
             if not self.substrate:
-                return 0
+                return -1
             # Run in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
@@ -333,7 +338,7 @@ class BackendService:
             )
         except Exception as e:
             logger.error(f"Failed to get latest block: {e}")
-            return 0
+            return -1
 
     async def _sync_metagraph(self) -> None:
         """Sync metagraph nodes."""
