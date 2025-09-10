@@ -28,6 +28,7 @@ from core.db.models import EvaluationStatus, SnowflakeId, TimestampMixin
 
 # Type aliases for consistency
 SS58Address = str  # Will be constrained to 48 chars in field definition
+Uuid = str  # UUID string
 
 
 # Models for API requests/responses
@@ -45,7 +46,7 @@ class CompetitionCreateRequest(SQLModel):
 class CompetitionResponse(SQLModel):
     """Response model for competition data."""
 
-    id: str
+    id: Uuid
     name: str
     description: Optional[str]
     benchmarks: List[dict]

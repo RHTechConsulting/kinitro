@@ -28,6 +28,7 @@ from core.messages import (
     EpisodeDataMessage,
     EpisodeStepDataMessage,
     EvalResultMessage,
+    MessageType,
 )
 
 from .config import BackendConfig
@@ -824,7 +825,7 @@ async def validator_websocket(websocket: WebSocket):
         data = await websocket.receive_text()
         message = json.loads(data)
 
-        if message.get("message_type") != "register":
+        if message.get("message_type") != MessageType.REGISTER:
             await websocket.send_text(json.dumps({"error": "Must register first"}))
             await websocket.close()
             return
@@ -872,7 +873,7 @@ async def validator_websocket(websocket: WebSocket):
         await websocket.send_text(
             json.dumps(
                 {
-                    "message_type": "registration_ack",
+                    "message_type": MessageType.REGISTRATION_ACK,
                     "status": "registered",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
@@ -887,7 +888,7 @@ async def validator_websocket(websocket: WebSocket):
             message = json.loads(data)
             message_type = message.get("message_type")
 
-            if message_type == "heartbeat":
+            if message_type == MessageType.HEARTBEAT:
                 # Update heartbeat
                 if not backend_service.async_session:
                     logger.error("Database not initialized")
@@ -907,13 +908,13 @@ async def validator_websocket(websocket: WebSocket):
                 await websocket.send_text(
                     json.dumps(
                         {
-                            "message_type": "heartbeat_ack",
+                            "message_type": MessageType.HEARTBEAT_ACK,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                     )
                 )
 
-            elif message_type == "eval_result":
+            elif message_type == MessageType.EVAL_RESULT:
                 # Handle evaluation result
                 result_msg = EvalResultMessage(**message)
 
@@ -988,14 +989,14 @@ async def validator_websocket(websocket: WebSocket):
                         await websocket.send_text(
                             json.dumps(
                                 {
-                                    "message_type": "result_ack",
+                                    "message_type": MessageType.RESULT_ACK,
                                     "job_id": result_msg.job_id,
                                     "status": "received",
                                 }
                             )
                         )
 
-            elif message_type == "episode_data":
+            elif message_type == MessageType.EPISODE_DATA:
                 # Handle episode data
                 episode_msg = EpisodeDataMessage(**message)
 
@@ -1054,7 +1055,7 @@ async def validator_websocket(websocket: WebSocket):
                         f"Stored episode data from {validator_hotkey} for episode {episode_msg.episode_id}"
                     )
 
-            elif message_type == "episode_step_data":
+            elif message_type == MessageType.EPISODE_STEP_DATA:
                 # Handle episode step data
                 step_msg = EpisodeStepDataMessage(**message)
 

@@ -49,12 +49,14 @@ from .models import (
     BackendState,
     Competition,
     MinerSubmission,
+    SS58Address,
     ValidatorConnection,
 )
 
 logger = get_logger(__name__)
 
 # TODO: implement weight broadcasting and weight setting to connecting validators
+ConnectionId = str  # Unique ID for each WebSocket connection
 
 
 class BackendService:
@@ -80,8 +82,8 @@ class BackendService:
         self.metagraph: Optional[Metagraph] = None
 
         # WebSocket connections
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.validator_connections: Dict[str, str] = {}  # connection_id -> hotkey
+        self.active_connections: Dict[ConnectionId, WebSocket] = {}
+        self.validator_connections: Dict[ConnectionId, SS58Address] = {}
 
         # Background tasks
         self._running = False

@@ -22,6 +22,7 @@ from core.messages import (
     EvalJobMessage,
     EvalResultMessage,
     HeartbeatMessage,
+    MessageType,
     ValidatorRegisterMessage,
 )
 from core.neuron import Neuron
@@ -164,7 +165,7 @@ class WebSocketValidator(Neuron):
         ack = json.loads(response)
 
         if (
-            ack.get("message_type") == "registration_ack"
+            ack.get("message_type") == MessageType.REGISTRATION_ACK
             and ack.get("status") == "registered"
         ):
             self.connected = True
@@ -199,11 +200,11 @@ class WebSocketValidator(Neuron):
                     message_type = data.get("message_type")
 
                     # TODO: create handler for receiving and setting weights
-                    if message_type == "eval_job":
+                    if message_type == MessageType.EVAL_JOB:
                         await self._handle_eval_job(EvalJobMessage(**data))
-                    elif message_type == "heartbeat_ack":
+                    elif message_type == MessageType.HEARTBEAT_ACK:
                         logger.debug("Received heartbeat ack")
-                    elif message_type == "error":
+                    elif message_type == MessageType.ERROR:
                         logger.error(f"Backend error: {data.get('error')}")
                     else:
                         logger.warning(f"Unknown message type: {message_type}")

@@ -6,6 +6,7 @@ communication between the Kinitro Backend and Validators.
 """
 
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
@@ -13,10 +14,25 @@ from sqlmodel import Field, SQLModel
 from core.db.models import EvaluationStatus, SnowflakeId
 
 
+class MessageType(StrEnum):
+    """Enumeration of all message types used in Kinitro communication."""
+
+    EVAL_JOB = "eval_job"
+    EVAL_RESULT = "eval_result"
+    REGISTER = "register"
+    HEARTBEAT = "heartbeat"
+    HEARTBEAT_ACK = "heartbeat_ack"
+    REGISTRATION_ACK = "registration_ack"
+    RESULT_ACK = "result_ack"
+    EPISODE_DATA = "episode_data"
+    EPISODE_STEP_DATA = "episode_step_data"
+    ERROR = "error"
+
+
 class EvalJobMessage(SQLModel):
     """Message for broadcasting evaluation jobs from backend to validators."""
 
-    message_type: str = "eval_job"
+    message_type: MessageType = MessageType.EVAL_JOB
     job_id: SnowflakeId
     competition_id: str
     submission_id: int
@@ -38,7 +54,7 @@ class EvalJobMessage(SQLModel):
 class EvalResultMessage(SQLModel):
     """Message for sending evaluation results from validators to backend."""
 
-    message_type: str = "eval_result"
+    message_type: MessageType = MessageType.EVAL_RESULT
     job_id: SnowflakeId
     validator_hotkey: str
     miner_hotkey: str
@@ -59,7 +75,7 @@ class EvalResultMessage(SQLModel):
 class ValidatorRegisterMessage(SQLModel):
     """Message for validator registration with backend."""
 
-    message_type: str = "register"
+    message_type: MessageType = MessageType.REGISTER
     hotkey: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -67,7 +83,7 @@ class ValidatorRegisterMessage(SQLModel):
 class HeartbeatMessage(SQLModel):
     """Message for validator heartbeat."""
 
-    message_type: str = "heartbeat"
+    message_type: MessageType = MessageType.HEARTBEAT
     queue_size: Optional[int] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -75,14 +91,14 @@ class HeartbeatMessage(SQLModel):
 class HeartbeatAckMessage(SQLModel):
     """Acknowledgment message for heartbeat."""
 
-    message_type: str = "heartbeat_ack"
+    message_type: MessageType = MessageType.HEARTBEAT_ACK
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class RegistrationAckMessage(SQLModel):
     """Acknowledgment message for validator registration."""
 
-    message_type: str = "registration_ack"
+    message_type: MessageType = MessageType.REGISTRATION_ACK
     status: EvaluationStatus
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -90,7 +106,7 @@ class RegistrationAckMessage(SQLModel):
 class ResultAckMessage(SQLModel):
     """Acknowledgment message for result submission."""
 
-    message_type: str = "result_ack"
+    message_type: MessageType = MessageType.RESULT_ACK
     job_id: SnowflakeId
     status: EvaluationStatus
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -99,7 +115,7 @@ class ResultAckMessage(SQLModel):
 class EpisodeDataMessage(SQLModel):
     """Message for sending episode data from validators to backend."""
 
-    message_type: str = "episode_data"
+    message_type: MessageType = MessageType.EPISODE_DATA
     job_id: SnowflakeId
     submission_id: str
     task_id: str  # Unique identifier for the task within the job
@@ -118,7 +134,7 @@ class EpisodeDataMessage(SQLModel):
 class EpisodeStepDataMessage(SQLModel):
     """Message for sending episode step data from validators to backend."""
 
-    message_type: str = "episode_step_data"
+    message_type: MessageType = MessageType.EPISODE_STEP_DATA
     submission_id: str
     task_id: str  # Unique identifier for the task within the job
     episode_id: int
@@ -136,7 +152,7 @@ class EpisodeStepDataMessage(SQLModel):
 class ErrorMessage(SQLModel):
     """Error message for communication issues."""
 
-    message_type: str = "error"
+    message_type: MessageType = MessageType.ERROR
     error: str
     details: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
