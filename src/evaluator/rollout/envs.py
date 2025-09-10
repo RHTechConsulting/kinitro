@@ -11,7 +11,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, TypedDict
 
 import gymnasium as gym
 import metaworld
@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Constant ripped from lerobot.constants
 OBS_IMAGES = "observation.images"
+DEFAULT_MAX_EPISODE_STEPS = 10
+DEFAULT_EPISODES_PER_TASK = 3
 
 
 def configure_headless_rendering():
@@ -49,7 +51,8 @@ class EnvSpec:
     config: Dict[str, Any] = field(default_factory=dict)
 
     # Runtime controls (optional configuration)
-    max_episode_steps: int = 200
+    episodes_per_task: int = DEFAULT_EPISODES_PER_TASK
+    max_episode_steps: int = DEFAULT_MAX_EPISODE_STEPS
     render_mode: str | None = "rgb_array"
 
     # Observation capture options
@@ -98,6 +101,14 @@ class EnvResult:
         return cls(env_spec, episodes, success_rate, mean_reward, mean_steps)
 
 
+class BenchmarkConfig(TypedDict, total=False):
+    """Type hints for benchmark configuration."""
+
+    env_name: str  # For MT1 benchmark
+    episodes_per_task: int  # Number of episodes to run per task
+    max_episode_steps: int  # Maximum steps per episode
+
+
 @dataclass
 class BenchmarkSpec:
     """Specification for a benchmark and its environments."""
@@ -106,10 +117,9 @@ class BenchmarkSpec:
     benchmark_name: str  # "MT1", "MT10", etc.
 
     # Additional configuration
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: BenchmarkConfig = field(default_factory=dict)
 
     # Runtime controls
-    max_episode_steps: int = 200
     render_mode: str | None = "rgb_array"
 
     # Observation capture options
@@ -345,8 +355,13 @@ class EnvManager:
                     benchmark_name="MT1",
                     provider="metaworld",
                     config={"task_idx": i, "task_data": task},
-                    # Inherit settings from benchmark_spec
-                    max_episode_steps=benchmark_spec.max_episode_steps,
+                    # Inherit settings from benchmark_spec config
+                    episodes_per_task=benchmark_spec.config.get(
+                        "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                    ),
+                    max_episode_steps=benchmark_spec.config.get(
+                        "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                    ),
                     render_mode=benchmark_spec.render_mode,
                     enable_image_obs=benchmark_spec.enable_image_obs,
                     image_size=benchmark_spec.image_size,
@@ -368,8 +383,13 @@ class EnvManager:
                         benchmark_name="MT10",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -391,8 +411,13 @@ class EnvManager:
                         benchmark_name="MT25",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -414,8 +439,13 @@ class EnvManager:
                         benchmark_name="MT50",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -437,8 +467,13 @@ class EnvManager:
                         benchmark_name="ML10",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,

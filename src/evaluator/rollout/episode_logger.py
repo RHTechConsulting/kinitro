@@ -348,7 +348,7 @@ class EpisodeLogger:
         if not self._pending_uploads:
             return
 
-        logger.debug(f"Waiting for {len(self._pending_uploads)} uploads to complete")
+        logger.info(f"Waiting for {len(self._pending_uploads)} uploads to complete")
 
         # Wait for all uploads to complete with timeout
         try:

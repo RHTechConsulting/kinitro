@@ -90,9 +90,6 @@ class RolloutWorker:
             f"{submission_container_host}:{submission_container_port}"
         )
         self.env_manager = EnvManager()
-        # TODO: these should be based on the benchmarks specs, not hardcoded
-        self.episodes_per_task = 3
-        self.max_steps_per_episode = 10
         self.eval_start = None
         self.eval_end = None
 
@@ -179,6 +176,10 @@ class RolloutWorker:
             env_spec, save_images=False, submission_id=str(self.submission_id)
         )
 
+        # Get parameters from env_spec (which now contains them)
+        episodes_per_task = env_spec.episodes_per_task
+        max_steps_per_episode = env_spec.max_episode_steps
+
         # Create episode logger for this environment
         logging_config = LoggingConfig(
             episode_log_interval=self.episode_log_interval,
@@ -207,13 +208,13 @@ class RolloutWorker:
         self.episode_loggers[env_key] = episode_logger
 
         episodes = []
-        for episode_id in range(self.episodes_per_task):
+        for episode_id in range(episodes_per_task):
             try:
                 episode_result = await self.run_episode(
                     env,
                     env_spec,
                     episode_id,
-                    self.max_steps_per_episode,
+                    max_steps_per_episode,
                     send_queue,
                     recv_queue,
                     episode_logger,
@@ -456,6 +457,4 @@ class RolloutWorker:
             "benchmark_specs": [str(spec) for spec in self.benchmark_specs],
             "eval_start": self.eval_start,
             "eval_end": self.eval_end,
-            "episodes_per_task": self.episodes_per_task,
-            "max_steps_per_episode": self.max_steps_per_episode,
         }
