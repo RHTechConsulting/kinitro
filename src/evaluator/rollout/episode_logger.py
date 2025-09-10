@@ -6,6 +6,13 @@ observations to both database and R2 storage with configurable intervals.
 """
 
 import logging
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    wait,
+)
+from concurrent.futures import (
+    TimeoutError as FutureTimeoutError,
+)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +28,10 @@ from core.messages import EpisodeDataMessage, EpisodeStepDataMessage
 from core.storage import R2Config, R2StorageClient
 
 logger = logging.getLogger(__name__)
+
+OBS_UPLOAD_CLEANUP_TIMEOUT = 5.0
+OBS_UPLOAD_TIMEOUT = 20.0
+MAX_UPLOAD_WORKERS = 4
 
 
 @dataclass
@@ -66,16 +77,26 @@ class EpisodeLogger:
     _current_episode_start: Optional[datetime] = field(default=None, init=False)
     _storage_client: Optional[R2StorageClient] = field(default=None, init=False)
 
+    # Background upload system
+    _upload_executor: Optional[ThreadPoolExecutor] = field(default=None, init=False)
+    _upload_futures: List[Any] = field(default_factory=list, init=False)
+    _pending_uploads: Dict[str, Any] = field(default_factory=dict, init=False)
+
     def __post_init__(self):
-        """Initialize storage client if R2 is enabled."""
+        """Initialize storage client and upload executor if R2 is enabled."""
         if self.config.enable_r2_upload and self.config.r2_config:
             try:
                 self._storage_client = R2StorageClient(self.config.r2_config)
-                logger.info("R2 storage client initialized for episode logging")
+                # Create thread pool for background uploads
+                self._upload_executor = ThreadPoolExecutor(
+                    max_workers=MAX_UPLOAD_WORKERS, thread_name_prefix="r2_upload"
+                )
+                logger.info("R2 storage client initialized with background upload pool")
             except Exception as e:
                 logger.error(f"Failed to initialize R2 storage: {e}")
                 logger.warning("Falling back to local storage only")
                 self._storage_client = None
+                self._upload_executor = None
 
     def start_episode(self, episode_id: int) -> None:
         """Start tracking a new episode.
@@ -129,6 +150,7 @@ class EpisodeLogger:
                     "reward": reward,
                     "done": done,
                     "truncated": truncated,
+                    "should_log": False,  # Mark as not to be logged
                 }
             )
             return
@@ -143,19 +165,17 @@ class EpisodeLogger:
             "info": info or {},
         }
 
-        # Upload observations to R2 if available
+        # Schedule background upload of observations if available
         if observations and self._storage_client:
-            try:
-                logger.info(f"Uploading observations for step {step}")
-                observation_refs = self._upload_observations(
-                    observations, self._current_episode_id, step
-                )
-                step_data["observation_refs"] = observation_refs
-            except Exception as e:
-                logger.error(f"Failed to upload observations for step {step}: {e}")
-                step_data["observation_refs"] = {}
+            upload_key = self._upload_observations_async(
+                observations, self._current_episode_id, step
+            )
+            # Store placeholder for now, will be resolved before sending to backend
+            step_data["upload_key"] = upload_key
+            step_data["observation_refs"] = {}  # Will be filled in later
         else:
             step_data["observation_refs"] = {}
+            step_data["upload_key"] = None
 
         # Mark step for later queuing if it should be logged
         step_data["should_log"] = should_log_step
@@ -199,6 +219,11 @@ class EpisodeLogger:
                 "extra_metrics": extra_metrics or {},
             }
 
+            # Wait for all background uploads to complete before sending data
+            self._wait_for_uploads(
+                timeout=OBS_UPLOAD_TIMEOUT
+            )  # 10 second timeout for uploads
+
             # Queue episode to database if configured
             if self.config.database_url:
                 await self._queue_episode_data(episode_data)
@@ -231,13 +256,15 @@ class EpisodeLogger:
         else:
             return {"type": "scalar", "value": action}
 
-    def _upload_observations(
+    def _upload_observations_sync(
         self,
         observations: List[Tuple[np.ndarray, str]],
         episode_id: int,
         step: int,
     ) -> Dict[str, Dict[str, str]]:
-        """Upload observations to R2 and return references.
+        """Synchronously upload observations to R2.
+
+        This is called in a background thread by _upload_observations_async.
 
         Args:
             observations: List of (image, camera_name) tuples
@@ -250,23 +277,125 @@ class EpisodeLogger:
         refs = {}
 
         for image, camera_name in observations:
-            result = self._storage_client.upload_observation_image(
-                image=image,
-                submission_id=self.submission_id,
-                task_id=self.task_id,
-                episode_id=episode_id,
-                step=step,
-                camera_name=camera_name,
-                fmt=self.config.image_format,
-            )
+            try:
+                result = self._storage_client.upload_observation_image(
+                    image=image,
+                    submission_id=self.submission_id,
+                    task_id=self.task_id,
+                    episode_id=episode_id,
+                    step=step,
+                    camera_name=camera_name,
+                    fmt=self.config.image_format,
+                )
 
-            refs[camera_name] = {
-                "bucket": result["bucket"],
-                "key": result["key"],
-                "url": result["url"],
-            }
+                refs[camera_name] = {
+                    "bucket": result["bucket"],
+                    "key": result["key"],
+                    "url": result["url"],
+                }
+            except Exception as e:
+                logger.error(
+                    f"Failed to upload observation {camera_name} for step {step}: {e}"
+                )
+                # Continue with other uploads even if one fails
 
         return refs
+
+    def _upload_observations_async(
+        self,
+        observations: List[Tuple[np.ndarray, str]],
+        episode_id: int,
+        step: int,
+    ) -> str:
+        """Schedule observation uploads in background and return a placeholder key.
+
+        Args:
+            observations: List of (image, camera_name) tuples
+            episode_id: Episode identifier
+            step: Step number
+
+        Returns:
+            Placeholder key for the upload future
+        """
+        if not self._upload_executor:
+            # Fallback to empty refs if executor not available
+            return None
+
+        # Create a unique key for this upload
+        upload_key = f"{episode_id}_{step}"
+
+        # Submit upload task to background thread pool
+        future = self._upload_executor.submit(
+            self._upload_observations_sync, observations, episode_id, step
+        )
+
+        # Store the future so we can retrieve results later
+        self._upload_futures.append(future)
+        self._pending_uploads[upload_key] = future
+
+        logger.debug(
+            f"Scheduled background upload for episode {episode_id}, step {step}"
+        )
+
+        return upload_key
+
+    def _wait_for_uploads(self, timeout: float = 30.0) -> None:
+        """Wait for all pending uploads to complete and update step data with results.
+
+        Args:
+            timeout: Maximum time to wait for uploads in seconds
+        """
+        if not self._pending_uploads:
+            return
+
+        logger.debug(f"Waiting for {len(self._pending_uploads)} uploads to complete")
+
+        # Wait for all uploads to complete with timeout
+        try:
+            # Get all pending futures
+            futures = list(self._pending_uploads.values())
+
+            # Wait for completion with timeout
+            done, not_done = wait(futures, timeout=timeout)
+
+            if not_done:
+                logger.warning(
+                    f"{len(not_done)} uploads did not complete within {timeout}s timeout"
+                )
+
+            # Update step data with upload results
+            for step_data in self._current_episode_steps:
+                upload_key = step_data.get("upload_key")
+                if upload_key and upload_key in self._pending_uploads:
+                    future = self._pending_uploads[upload_key]
+                    if future.done():
+                        try:
+                            # Get the upload results
+                            refs = future.result(timeout=0.1)
+                            step_data["observation_refs"] = refs
+                            logger.debug(f"Retrieved upload results for {upload_key}")
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to get upload results for {upload_key}: {e}"
+                            )
+                            step_data["observation_refs"] = {}
+                    else:
+                        logger.warning(
+                            f"Upload {upload_key} not completed, using empty refs"
+                        )
+                        step_data["observation_refs"] = {}
+
+            # Clear pending uploads
+            self._pending_uploads.clear()
+
+        except FutureTimeoutError:
+            logger.error(f"Upload wait timed out after {timeout}s")
+            # Set empty refs for all incomplete uploads
+            for step_data in self._current_episode_steps:
+                if step_data.get("upload_key") and not step_data.get(
+                    "observation_refs"
+                ):
+                    step_data["observation_refs"] = {}
 
     async def _queue_episode_data(self, episode_data: Dict[str, Any]) -> None:
         """Queue episode data to be sent to backend via pgqueuer.
@@ -308,6 +437,16 @@ class EpisodeLogger:
         try:
             # Convert datetime to ISO format
             step_data_copy = step_data.copy()
+
+            # Remove internal fields that shouldn't be sent
+            step_data_copy.pop("upload_key", None)
+            step_data_copy.pop("should_log", None)
+
+            # Only process if this step data has full information (not just basic summary)
+            if "timestamp" not in step_data_copy:
+                logger.error("Step data missing timestamp - skipping queue")
+                return
+
             step_data_copy["step_timestamp"] = step_data_copy["timestamp"].isoformat()
             step_data_copy["submission_id"] = self.submission_id
             step_data_copy["task_id"] = self.task_id
@@ -315,7 +454,6 @@ class EpisodeLogger:
 
             # Remove the original timestamp key since we renamed it
             del step_data_copy["timestamp"]
-            del step_data_copy["should_log"]  # Remove internal flag
 
             # Create message
             step_msg = EpisodeStepDataMessage(**step_data_copy)
@@ -333,6 +471,17 @@ class EpisodeLogger:
 
         except Exception as e:
             logger.error(f"Failed to queue step data: {e}")
+
+    def cleanup(self) -> None:
+        """Clean up resources, shutdown upload executor."""
+        if self._upload_executor:
+            # Wait for any remaining uploads
+            self._wait_for_uploads(timeout=OBS_UPLOAD_CLEANUP_TIMEOUT)
+
+            # Shutdown the executor
+            self._upload_executor.shutdown(wait=True, cancel_futures=True)
+            self._upload_executor = None
+            logger.info("Upload executor shutdown complete")
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get current logging statistics.
