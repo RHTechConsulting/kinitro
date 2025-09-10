@@ -195,6 +195,7 @@ class RolloutWorker:
         episode_logger = EpisodeLogger(
             config=logging_config,
             submission_id=str(self.submission_id),
+            # TODO: rename rollout_worker_id to job_id in RolloutWorker
             job_id=self.rollout_worker_id,  # Using worker ID as job ID for now
             task_id=task_id,
             env_name=env_spec.env_name,
@@ -316,7 +317,7 @@ class RolloutWorker:
                 if episode_logger:
                     # Capture observations if the environment wrapper has the method
                     observations = None
-                    logger.info(
+                    logger.debug(
                         f"Environment type: {type(env)}, has capture method: {hasattr(env, 'capture_and_save_images')}"
                     )
 
@@ -330,7 +331,7 @@ class RolloutWorker:
                         try:
                             images_hwc, camera_names = env.env.capture_and_save_images()
                             observations = list(zip(images_hwc, camera_names))
-                            logger.debug(
+                            logger.info(
                                 f"Captured {len(images_hwc)} images from cameras: {camera_names}"
                             )
                         except Exception as e:

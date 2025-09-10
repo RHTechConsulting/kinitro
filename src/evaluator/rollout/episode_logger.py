@@ -16,6 +16,7 @@ import numpy as np
 from pgqueuer import Queries
 from pgqueuer.db import AsyncpgDriver
 
+from core.constants import ImageFormat
 from core.messages import EpisodeDataMessage, EpisodeStepDataMessage
 from core.storage import R2Config, R2StorageClient
 
@@ -38,7 +39,7 @@ class LoggingConfig:
     local_save_dir: Optional[Path] = None
 
     # Image settings
-    image_format: str = "png"
+    image_format: ImageFormat = ImageFormat.PNG
     image_quality: int = 95  # For JPEG
 
     # Database URL for pgqueuer
@@ -110,7 +111,7 @@ class EpisodeLogger:
             observations: List of (image, camera_name) tuples
             info: Additional info from environment
         """
-        logging.info("Logging step data")
+        logger.info("Logging step data")
         if self._current_episode_id is None:
             logger.warning("Attempted to log step without active episode")
             return
@@ -145,7 +146,7 @@ class EpisodeLogger:
         # Upload observations to R2 if available
         if observations and self._storage_client:
             try:
-                logging.info(f"Uploading observations for step {step}")
+                logger.info(f"Uploading observations for step {step}")
                 observation_refs = self._upload_observations(
                     observations, self._current_episode_id, step
                 )

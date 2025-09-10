@@ -55,9 +55,6 @@ class EvaluationJob(TimestampMixin, SQLModel, table=True):
 
     # Container/execution info
     container_id: Optional[str] = Field(default=None, max_length=128)
-    logs_path: Optional[str] = Field(
-        default=None, sa_column=Column(SAText, nullable=True)
-    )
     error_message: Optional[str] = Field(
         default=None, sa_column=Column(SAText, nullable=True)
     )

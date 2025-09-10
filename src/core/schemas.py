@@ -27,7 +27,7 @@ class ModelChainCommitment(ChainCommitment):
     Represents a model chain commitment with a unique identifier and the commitment data.
     """
 
-    prvdr: ModelProvider = Field(..., description="Provider of the model")
+    provider: ModelProvider = Field(..., description="Provider of the model")
     comp_id: str = Field(..., description="Identifier for the competition")
     repo_id: str = Field(
         ..., description="Identifier for the repository on the provider"

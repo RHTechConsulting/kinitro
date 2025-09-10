@@ -49,7 +49,6 @@ class Orchestrator:
     async def process_job(self, job: Job):
         logger.info(f"Processing job: {job.id}")
         if job.payload:
-            # TODO: there is probably a much better way to do this
             eval_job_msg = EvalJobMessage.from_bytes(job.payload)
             evaluation_job = EvaluationJob(
                 id=eval_job_msg.job_id,
@@ -61,8 +60,6 @@ class Orchestrator:
                 benchmark_name=eval_job_msg.benchmark_name,
                 config=eval_job_msg.config,
                 # TODO: where should this be set?
-                logs_path="./data/logs",
-                # created at will be the current datetime
                 created_at=datetime.now(timezone.utc),
             )
 

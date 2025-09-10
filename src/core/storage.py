@@ -15,12 +15,14 @@ import numpy as np
 from botocore.exceptions import ClientError
 from PIL import Image
 
+from core.constants import PRESIGN_EXPIRY, ImageFormat
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class R2Config:
-    """Configuration for R2/S3 storage client."""
+    """Configuration for R2/S3-compatible storage client."""
 
     endpoint_url: str
     access_key_id: str
@@ -76,7 +78,7 @@ class R2StorageClient:
         episode_id: int,
         step: int,
         camera_name: str = "default",
-        fmt: str = "png",
+        fmt: ImageFormat = ImageFormat.PNG,
     ) -> Dict[str, str]:
         """Upload a single observation image to R2.
 
@@ -144,7 +146,7 @@ class R2StorageClient:
         task_id: str,
         episode_id: int,
         step: int,
-        fmt: str = "png",
+        fmt: ImageFormat = ImageFormat.PNG,
     ) -> List[Dict[str, str]]:
         """Upload multiple observation images (e.g., different camera views).
 
@@ -190,7 +192,7 @@ class R2StorageClient:
             return self.s3_client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self.bucket_name, "Key": key},
-                ExpiresIn=604800,  # 7 days
+                ExpiresIn=PRESIGN_EXPIRY,  # 7 days
             )
 
     def delete_submission_data(self, submission_id: str) -> int:

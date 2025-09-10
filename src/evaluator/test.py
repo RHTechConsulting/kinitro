@@ -26,7 +26,6 @@ async def main():
         ray_worker_id=None,
         retry_count=0,
         max_retries=3,
-        logs_path="./data/logs",
         random_seed=None,
         eval_start=None,
         eval_end=None,

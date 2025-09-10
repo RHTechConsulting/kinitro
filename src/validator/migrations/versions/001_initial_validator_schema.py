@@ -74,7 +74,6 @@ def upgrade() -> None:
         sa.Column("max_retries", sa.Integer(), nullable=False, server_default="3"),
         sa.Column("retry_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("container_id", sa.String(length=128), nullable=True),
-        sa.Column("logs_path", sa.Text(), nullable=True),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("random_seed", sa.Integer(), nullable=True),
         sa.Column(
