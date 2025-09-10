@@ -119,11 +119,11 @@ graph TB
     R2 -->|Observation URLs| API
 
     %% Styling
-    classDef external fill:#e1f5fe
-    classDef miner fill:#f3e5f5
-    classDef backend fill:#e8f5e8
-    classDef validator fill:#fff3e0
-    classDef evaluator fill:#fce4ec
+    classDef external fill:#0277bd,color:#fff,stroke:#01579b,stroke-width:2px
+    classDef miner fill:#6a1b9a,color:#fff,stroke:#4a148c,stroke-width:2px
+    classDef backend fill:#2e7d32,color:#fff,stroke:#1b5e20,stroke-width:2px
+    classDef validator fill:#ef6c00,color:#fff,stroke:#e65100,stroke-width:2px
+    classDef evaluator fill:#ad1457,color:#fff,stroke:#880e4f,stroke-width:2px
     
     class BC,HF,R2 external
     class MC,MS miner
