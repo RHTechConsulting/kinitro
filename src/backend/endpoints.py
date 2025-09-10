@@ -22,6 +22,7 @@ from backend.constants import (
     MIN_PAGE_LIMIT,
 )
 from backend.service import BackendService
+from core import __version__ as VERSION
 from core.db.models import EvaluationStatus, SnowflakeId
 from core.log import get_logger
 from core.messages import (
@@ -95,7 +96,7 @@ async def root() -> dict:
     """Root endpoint."""
     return {
         "service": "Kinitro Backend",
-        "version": "1.0.0",
+        "version": VERSION,
         "docs": "/docs",
         "health": "/health",
     }
