@@ -1,2 +1,1 @@
 pg_database = "postgresql://postgres@localhost/validatordb"
-duck_db = "./evaluator.duckdb"

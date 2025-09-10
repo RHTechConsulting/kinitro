@@ -1,0 +1,9 @@
+# Evaluator configuration example
+# Copy this file to the root directory as evaluator.toml and adjust the settings
+
+# PostgreSQL database connection
+pg_database = "postgresql://postgres@localhost/validatordb"
+
+# Episode and step logging intervals
+episode_log_interval = 1
+step_log_interval = 5
