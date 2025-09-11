@@ -29,9 +29,30 @@ class Config:
     """
 
     def __init__(self, opts: ConfigOpts):
+        self._parser = ArgumentParser()
+
+        # Add config argument first for early parsing
+        self._parser.add_argument(
+            "--config",
+            "-c",
+            type=str,
+            help="Path to configuration file (TOML format)",
+            default=None,
+        )
+
+        # Parse known args to get config file early
+        known_args, _ = self._parser.parse_known_args()
+
+        # Build settings files list
         settings_files = ["settings.toml", ".secrets.toml"]
         if opts.settings_files:
             settings_files.extend(opts.settings_files)
+        if known_args.config:
+            config_path = Path(known_args.config)
+            if not config_path.exists():
+                raise FileNotFoundError(f"Config file not found: {known_args.config}")
+            settings_files = [known_args.config]
+            print(f"Using custom config file: {known_args.config}")
 
         self.settings: Dynaconf = Dynaconf(
             settings_files=settings_files,
@@ -39,9 +60,8 @@ class Config:
                 Validator("wallet_name", must_exist=True, default="default_wallet"),
             ],
         )
-        self._parser = ArgumentParser()
 
-        # Add arguments
+        # Add all other arguments
         self.add_args()
         match opts.neuron_type:
             case NeuronType.Miner:

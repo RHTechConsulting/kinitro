@@ -1,2 +1,0 @@
-pg_database = "postgresql://postgres@localhost/kinitrodb"
-duck_db = "./evaluator.duckdb"

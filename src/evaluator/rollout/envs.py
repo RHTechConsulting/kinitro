@@ -11,7 +11,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, TypedDict
 
 import gymnasium as gym
 import metaworld
@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Constant ripped from lerobot.constants
 OBS_IMAGES = "observation.images"
+DEFAULT_MAX_EPISODE_STEPS = 10
+DEFAULT_EPISODES_PER_TASK = 3
 
 
 def configure_headless_rendering():
@@ -49,7 +51,8 @@ class EnvSpec:
     config: Dict[str, Any] = field(default_factory=dict)
 
     # Runtime controls (optional configuration)
-    max_episode_steps: int = 200
+    episodes_per_task: int = DEFAULT_EPISODES_PER_TASK
+    max_episode_steps: int = DEFAULT_MAX_EPISODE_STEPS
     render_mode: str | None = "rgb_array"
 
     # Observation capture options
@@ -98,6 +101,14 @@ class EnvResult:
         return cls(env_spec, episodes, success_rate, mean_reward, mean_steps)
 
 
+class BenchmarkConfig(TypedDict, total=False):
+    """Type hints for benchmark configuration."""
+
+    env_name: str  # Name of environment from the benchmark
+    episodes_per_task: int  # Number of episodes to run per task
+    max_episode_steps: int  # Maximum steps per episode
+
+
 @dataclass
 class BenchmarkSpec:
     """Specification for a benchmark and its environments."""
@@ -106,10 +117,9 @@ class BenchmarkSpec:
     benchmark_name: str  # "MT1", "MT10", etc.
 
     # Additional configuration
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: BenchmarkConfig = field(default_factory=dict)
 
     # Runtime controls
-    max_episode_steps: int = 200
     render_mode: str | None = "rgb_array"
 
     # Observation capture options
@@ -226,7 +236,13 @@ class MultiViewImageObsWrapper(ObservationWrapper):
 
         return np.asarray(frame)
 
-    def observation(self, obs):  # type: ignore[override]
+    def capture_and_save_images(self) -> tuple[list[np.ndarray], list[str]]:
+        """Capture images from all configured camera views and optionally save them.
+
+        Returns:
+            Tuple of (images_hwc, camera_names_used) where images_hwc is a list of
+            HWC format numpy arrays and camera_names_used is the list of camera names.
+        """
         images_hwc: list[np.ndarray] = []
         camera_names_used: list[str] = []
 
@@ -257,18 +273,14 @@ class MultiViewImageObsWrapper(ObservationWrapper):
 
         # Save images to disk if enabled
         # TODO: we'd want to save images in an R2 bucket or something
-        # and we'd want to do it elsewhere, not *inside* of observation() lol
         if self._save_images and self._image_save_dir:
             self._save_images_to_disk(images_hwc, camera_names_used)
 
-        # Convert images to CHW uint8
-        images_chw = [
-            np.transpose(img, (2, 0, 1)).astype(np.uint8) for img in images_hwc
-        ]
+        return images_hwc, camera_names_used
 
+    def observation(self, obs):  # type: ignore[override]
         # For now, return base observation directly to avoid RPC message size limits
-        # Images are still saved to disk for analysis
-        # This avoids both the concatenation issue and the message size problem
+        # The capture_and_save_images method can be called separately when needed
 
         # Increment step counter
         self._step_count += 1
@@ -343,8 +355,13 @@ class EnvManager:
                     benchmark_name="MT1",
                     provider="metaworld",
                     config={"task_idx": i, "task_data": task},
-                    # Inherit settings from benchmark_spec
-                    max_episode_steps=benchmark_spec.max_episode_steps,
+                    # Inherit settings from benchmark_spec config
+                    episodes_per_task=benchmark_spec.config.get(
+                        "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                    ),
+                    max_episode_steps=benchmark_spec.config.get(
+                        "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                    ),
                     render_mode=benchmark_spec.render_mode,
                     enable_image_obs=benchmark_spec.enable_image_obs,
                     image_size=benchmark_spec.image_size,
@@ -366,8 +383,13 @@ class EnvManager:
                         benchmark_name="MT10",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -389,8 +411,13 @@ class EnvManager:
                         benchmark_name="MT25",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -412,8 +439,13 @@ class EnvManager:
                         benchmark_name="MT50",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -435,8 +467,13 @@ class EnvManager:
                         benchmark_name="ML10",
                         provider="metaworld",
                         config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec
-                        max_episode_steps=benchmark_spec.max_episode_steps,
+                        # Inherit settings from benchmark_spec config
+                        episodes_per_task=benchmark_spec.config.get(
+                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
+                        ),
+                        max_episode_steps=benchmark_spec.config.get(
+                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
+                        ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
                         image_size=benchmark_spec.image_size,
@@ -473,11 +510,16 @@ class EnvManager:
         if effective_render_mode == "human":
             effective_render_mode = "rgb_array"
 
+        logger.debug(
+            f"Debug wrapper conditions: enable_image_obs={env_spec.enable_image_obs}, effective_render_mode={effective_render_mode}, render_mode={env_spec.render_mode}"
+        )
+
         if (
             env_spec.enable_image_obs
             and effective_render_mode == "rgb_array"
             and env_spec.render_mode != "human"
         ):
+            logger.debug("Applying MultiViewImageObsWrapper")
             env = MultiViewImageObsWrapper(
                 env,
                 image_size=env_spec.image_size,
@@ -487,6 +529,8 @@ class EnvManager:
                 image_save_dir="data" if save_images else None,
                 submission_id=submission_id,
             )
+        else:
+            logger.warning("NOT applying MultiViewImageObsWrapper - conditions not met")
 
         # Optional human display wrapper if user requested human rendering
         if env_spec.render_mode == "human":

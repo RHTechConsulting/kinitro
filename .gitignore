@@ -2,9 +2,10 @@
 .DS_Store
 temp/
 
+/backend.toml
 /miner.toml
 /validator.toml
-/validator_child.toml
+/evaluator.toml
 
 # duckdb
 *.duckdb

@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import capnp
 import numpy as np
@@ -10,9 +10,11 @@ from ray.util.queue import Queue
 
 from core.db.models import SnowflakeId
 from core.log import get_logger
+from core.storage import R2Config
 
 from ..rpc.rpc_process import RPCRequest
 from .envs import BenchmarkSpec, EnvManager, EnvResult, EnvSpec, EpisodeResult
+from .episode_logger import EpisodeLogger, LoggingConfig
 
 logger = get_logger(__name__)
 
@@ -31,6 +33,10 @@ class RolloutCluster:
         submission_container_host: str,
         submission_container_port: int,
         submission_id: SnowflakeId | None = None,
+        r2_config: Optional[R2Config] = None,
+        episode_log_interval: int = 1,
+        step_log_interval: int = 1,
+        database_url: Optional[str] = None,
     ) -> ray.actor.ActorHandle:
         logger.info(
             f"Creating worker: {rollout_worker_id}, {benchmark_specs}, {submission_container_host}, {submission_container_port}, {submission_id}"
@@ -42,6 +48,10 @@ class RolloutCluster:
             submission_container_host,
             submission_container_port,
             submission_id,
+            r2_config,
+            episode_log_interval,
+            step_log_interval,
+            database_url,
         )
         self.workers.append(worker)
         return worker
@@ -61,6 +71,10 @@ class RolloutWorker:
         submission_container_host: str,
         submission_container_port: int,
         submission_id: SnowflakeId | None = None,
+        r2_config: Optional[R2Config] = None,
+        episode_log_interval: int = 1,
+        step_log_interval: int = 1,
+        database_url: Optional[str] = None,
     ) -> None:
         logger.info(
             f"RolloutWorker init: {cluster_name}, {rollout_worker_id}, {benchmark_specs}, "
@@ -76,11 +90,15 @@ class RolloutWorker:
             f"{submission_container_host}:{submission_container_port}"
         )
         self.env_manager = EnvManager()
-        # TODO: these should be based on the benchmarks specs, not hardcoded
-        self.episodes_per_task = 1
-        self.max_steps_per_episode = 25
         self.eval_start = None
         self.eval_end = None
+
+        # Episode logging configuration
+        self.episode_log_interval = episode_log_interval
+        self.step_log_interval = step_log_interval
+        self.r2_config = r2_config
+        self.database_url = database_url
+        self.episode_loggers: Dict[str, EpisodeLogger] = {}
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
@@ -154,19 +172,51 @@ class RolloutWorker:
         self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue
     ) -> EnvResult:
         env = self.env_manager.make_env(
-            env_spec, save_images=True, submission_id=str(self.submission_id)
+            env_spec, save_images=False, submission_id=str(self.submission_id)
         )
 
+        # Get parameters from env_spec (which now contains them)
+        episodes_per_task = env_spec.episodes_per_task
+        max_steps_per_episode = env_spec.max_episode_steps
+
+        # Create episode logger for this environment
+        logging_config = LoggingConfig(
+            episode_log_interval=self.episode_log_interval,
+            step_log_interval=self.step_log_interval,
+            enable_r2_upload=self.r2_config is not None,
+            r2_config=self.r2_config,
+            database_url=self.database_url,
+        )
+
+        # Generate a unique task ID combining benchmark and env names
+        task_uid = getattr(env_spec, "task_idx", int(time.time()))
+        task_id = f"{env_spec.benchmark_name}_{env_spec.env_name}_{task_uid}"
+
+        episode_logger = EpisodeLogger(
+            config=logging_config,
+            submission_id=str(self.submission_id),
+            # TODO: rename rollout_worker_id to job_id in RolloutWorker
+            job_id=self.rollout_worker_id,  # Using worker ID as job ID for now
+            task_id=task_id,
+            env_name=env_spec.env_name,
+            benchmark_name=env_spec.benchmark_name,
+        )
+
+        # Store logger for this environment
+        env_key = f"{env_spec.benchmark_name}_{env_spec.env_name}_{task_uid}"
+        self.episode_loggers[env_key] = episode_logger
+
         episodes = []
-        for episode_id in range(self.episodes_per_task):
+        for episode_id in range(episodes_per_task):
             try:
                 episode_result = await self.run_episode(
                     env,
                     env_spec,
                     episode_id,
-                    self.max_steps_per_episode,
+                    max_steps_per_episode,
                     send_queue,
                     recv_queue,
+                    episode_logger,
                 )
                 episodes.append(episode_result)
             except Exception:
@@ -177,9 +227,20 @@ class RolloutWorker:
         return EnvResult.from_episodes(env_spec, episodes)
 
     async def run_episode(
-        self, env, env_spec, episode_id, max_steps, send_queue: Queue, recv_queue: Queue
+        self,
+        env,
+        env_spec,
+        episode_id,
+        max_steps,
+        send_queue: Queue,
+        recv_queue: Queue,
+        episode_logger: Optional[EpisodeLogger] = None,
     ):
         logger.info("Starting episode %d for env %s", episode_id, env_spec)
+
+        # Start episode logging if logger is available
+        if episode_logger:
+            episode_logger.start_episode(episode_id)
 
         # Reset may return (obs, info) or just obs depending on gym
         res = env.reset()
@@ -252,6 +313,55 @@ class RolloutWorker:
                     {"step": step_count, "reward": reward, "done": done, "info": info}
                 )
 
+                # Log step data if logger is available
+                if episode_logger:
+                    # Capture observations if the environment wrapper has the method
+                    observations = None
+                    logger.debug(
+                        f"Environment type: {type(env)}, has capture method: {hasattr(env, 'capture_and_save_images')}"
+                    )
+
+                    # Check if the wrapped environment has the method
+                    if hasattr(env, "env") and hasattr(
+                        env.env, "capture_and_save_images"
+                    ):
+                        logger.debug(
+                            f"Wrapped environment type: {type(env.env)}, has capture method: True"
+                        )
+                        try:
+                            images_hwc, camera_names = env.env.capture_and_save_images()
+                            observations = list(zip(images_hwc, camera_names))
+                            logger.info(
+                                f"Captured {len(images_hwc)} images from cameras: {camera_names}"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Could not capture images from wrapped env: {e}"
+                            )
+                    elif hasattr(env, "capture_and_save_images"):
+                        try:
+                            images_hwc, camera_names = env.capture_and_save_images()
+                            observations = list(zip(images_hwc, camera_names))
+                            logger.info(
+                                f"Captured {len(images_hwc)} images from cameras: {camera_names}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not capture images: {e}")
+                    else:
+                        logger.warning(
+                            "Environment does not have capture_and_save_images method"
+                        )
+
+                    await episode_logger.log_step(
+                        step=step_count,
+                        action=action_arr,
+                        reward=float(reward),
+                        done=done,
+                        truncated=False,  # Add truncated detection if available
+                        observations=observations,
+                        info=info,
+                    )
+
                 if step_count % LOGGING_INTERVAL == 0:
                     logger.info(
                         "Episode %d progress: %d/%d steps, total_reward=%.3f",
@@ -268,15 +378,24 @@ class RolloutWorker:
                 break
 
         episode_duration = time.time() - episode_start
+        success = info.get("success", False) if info else False
 
         episode_result = EpisodeResult(
             episode_id=episode_id,
             env_spec=env_spec,
             reward=total_reward,
             steps=step_count,
-            success=info.get("success", False) if info else False,
+            success=success,
             info={"duration": episode_duration, "episode_steps": episode_steps},
         )
+
+        # End episode logging if logger is available
+        if episode_logger:
+            await episode_logger.end_episode(
+                total_reward=total_reward,
+                success=success,
+                extra_metrics={"duration": episode_duration, "final_info": info},
+            )
 
         logger.info(
             "Episode %d completed: steps=%d reward=%.2f success=%s",
@@ -337,6 +456,4 @@ class RolloutWorker:
             "benchmark_specs": [str(spec) for spec in self.benchmark_specs],
             "eval_start": self.eval_start,
             "eval_end": self.eval_end,
-            "episodes_per_task": self.episodes_per_task,
-            "max_steps_per_episode": self.max_steps_per_episode,
         }
