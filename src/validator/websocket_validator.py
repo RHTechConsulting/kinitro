@@ -65,10 +65,6 @@ class WebSocketValidator(Neuron):
 
         self.q: Optional[Queries] = None
 
-        # Job tracking
-        # TODO: remove?
-        # self.active_jobs: Dict[str, EvalJobMessage] = {}
-
         logger.info(f"WebSocket Validator initialized for hotkey: {self.hotkey}")
 
     async def start(self):

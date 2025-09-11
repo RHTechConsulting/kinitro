@@ -9,7 +9,7 @@ Validators are responsible for evaluating the performance of miner-submitted age
 ## Setup
 
 ### Setting up environment variables
-Copy-paste the `.env.validator.example` file to `.env` and fill in the required environment variables:
+Copy the `.env.validator.example` file to `.env` and fill in the required environment variables:
 ```bash
 cp .env.validator.example .env
 ```
@@ -49,7 +49,7 @@ To set up the database, you can either:
 The migration script will check if the database exists and run Alembic migrations to bring it up to date. It will also ensure the pgq extension is installed if needed.
 
 ### Running the Websocket app
-The websocket app will connect to the kinitro platform and listen for evaluation jobs, and forward them to the evaluator (which we will soon set up) to execute.
+The websocket app will connect to the Kinitro platform and listen for evaluation jobs, and forward them to the evaluator to execute.
 Once your configuration file is set up, you can run the validator using the following command:
 ```bash
 python -m validator --config validator.toml

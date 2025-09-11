@@ -4,13 +4,13 @@ section: 'Get Started'
 
 # Miner
 ### Setting up environment variables
-Copy-paste the `.env.miner.example` file to `.env` and fill in the required environment variables:
+Copy the `.env.miner.example` file to `.env` and fill in the required environment variables:
 ```bash
 cp .env.miner.example .env
 ```
 
 ### Configuration
-Copy the example configuration file, and edit it to include parameters like your hugging face submission repo, bittensor wallet, etc.
+Copy the example configuration file, and edit it to include parameters like your Hugging Face submission repo, Bittensor wallet location, etc.
 ```bash
 cp configs/miner.toml.example miner.toml
 ```
@@ -19,9 +19,9 @@ Edit `configs/miner.toml` to set your desired parameters.
 ### Uploading your agent
 To upload your agent to the Kinitro platform, use the following command:
 ```bash
-python -m miner upload --config miner.toml
+python -m miner upload
 ```
-This command will package your agent, upload it to the specified huggingface repository.
+This command will package your agent, upload it to the specified Hugging Face repository.
 
 ### Committing submission info to the blockchain
 After uploading your agent, you need to commit the submission information to the Bittensor blockchain. Use the following command:

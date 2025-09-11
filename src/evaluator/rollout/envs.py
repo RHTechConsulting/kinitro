@@ -104,7 +104,7 @@ class EnvResult:
 class BenchmarkConfig(TypedDict, total=False):
     """Type hints for benchmark configuration."""
 
-    env_name: str  # For MT1 benchmark
+    env_name: str  # Name of environment from the benchmark
     episodes_per_task: int  # Number of episodes to run per task
     max_episode_steps: int  # Maximum steps per episode
 

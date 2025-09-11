@@ -5,6 +5,7 @@ temp/
 /backend.toml
 /miner.toml
 /validator.toml
+/evaluator.toml
 
 # duckdb
 *.duckdb

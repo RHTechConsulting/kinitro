@@ -16,7 +16,6 @@ from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 from core.db.models import EvaluationStatus, TimestampMixin
 
 
-# TODO: create base models for a bunch of these? or perhaps just not do it and move straigh to using sqlmodel
 class EvaluationJob(TimestampMixin, SQLModel, table=True):
     """Evaluation jobs received from backend."""
 
