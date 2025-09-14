@@ -15,6 +15,9 @@ submission_dir = "./evaluator/submissions/default_submission"
 # Chosen competition ID
 competition_id = "your-chosen-competition-id"
 
+# Chain commitment version (optional, defaults to "1.0")
+chain_commitment_version = "1.0"
+
 [subtensor]
 network = "finney"
 address = "wss://entrypoint-finney.opentensor.ai:443"

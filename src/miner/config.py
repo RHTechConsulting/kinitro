@@ -47,6 +47,14 @@ class MinerConfig(Config):
             ),
         )
 
+        # Chain commitment configuration
+        self._parser.add_argument(
+            "--chain-commitment-version",
+            type=str,
+            help="Version of the chain commitment schema",
+            default=self.settings.get("chain_commitment_version", "1.0"),
+        )
+
         # CLI commands
         self._parser.add_argument(
             "command",

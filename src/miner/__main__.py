@@ -72,6 +72,7 @@ def handle_commit_command(config: MinerConfig) -> None:
 
     # Prepare commitment data
     commit_data = ModelChainCommitment(
+        v=config.settings.get("chain_commitment_version", "1.0"),
         provider=ModelProvider.HF,
         repo_id=config.settings["hf_repo_id"],
         comp_id=config.settings["competition_id"],
