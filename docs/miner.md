@@ -29,3 +29,10 @@ After uploading your agent, you need to commit the submission information to the
 python -m miner commit --config miner.toml
 ```
 This command will create a new submission on the blockchain, linking to the uploaded agent.
+
+#### Chain Commitment Version
+You can specify the chain commitment version in your configuration file or via command line:
+- In `miner.toml`: Set `chain_commitment_version = "1.0"`
+- Via CLI: Use `--chain-commitment-version "1.0"`
+
+The default version is "1.0" if not specified.

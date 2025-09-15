@@ -8,7 +8,7 @@ CHAIN_COMMITMENT_VERSION = "1.0"
 
 class ModelProvider(StrEnum):
     HF = "HF"  # Hugging Face
-    R2 = "R2"  # Cloudflare R2
+    R2 = "R2"  # Cloudflare R2 - NOTE: currently NOT supported
 
 
 class ChainCommitment(BaseModel):

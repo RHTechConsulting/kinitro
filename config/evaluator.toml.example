@@ -7,3 +7,6 @@ pg_database = "postgresql://postgres@localhost/validatordb"
 # Episode and step logging intervals
 episode_log_interval = 1
 step_log_interval = 5
+
+# Maximum number of concurrent evaluation jobs
+max_concurrent_jobs = 4

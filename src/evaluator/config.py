@@ -27,6 +27,9 @@ class EvaluatorConfig(Config):
         self.episode_log_interval = self.settings.get("episode_log_interval", 1)
         self.step_log_interval = self.settings.get("step_log_interval", 1)
 
+        # Concurrent job execution configuration
+        self.max_concurrent_jobs = self.settings.get("max_concurrent_jobs", 4)
+
     def _load_r2_config(self) -> Optional[R2Config]:
         """Load R2 configuration from environment variables only."""
         # Load from environment variables only
