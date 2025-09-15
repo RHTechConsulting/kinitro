@@ -31,6 +31,7 @@ PROCESS_JOB_WAIT_TIME = 1
 QUEUE_MAXSIZE = 100
 # TODO: this might be way too long
 EVAL_TIMEOUT = 3600
+RAY_WAIT_TIMEOUT = 0.1
 
 
 class Orchestrator:
@@ -184,7 +185,7 @@ class Orchestrator:
 
         try:
             # Use ray.wait with timeout to check if job is done without blocking
-            ready, not_ready = ray.wait([evaluation_future], timeout=0.1)
+            ready, not_ready = ray.wait([evaluation_future], timeout=RAY_WAIT_TIMEOUT)
 
             if ready:
                 # Job completed, get results

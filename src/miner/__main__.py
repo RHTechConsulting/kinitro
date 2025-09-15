@@ -13,6 +13,8 @@ from .config import MinerConfig
 logger = get_logger(__name__)
 dotenv.load_dotenv()
 
+DEFAULT_COMMITMENT_VERSION = "1.0"
+
 
 def handle_upload_command(config: MinerConfig) -> None:
     """
@@ -72,7 +74,7 @@ def handle_commit_command(config: MinerConfig) -> None:
 
     # Prepare commitment data
     commit_data = ModelChainCommitment(
-        v=config.settings.get("chain_commitment_version", "1.0"),
+        v=config.settings.get("chain_commitment_version", DEFAULT_COMMITMENT_VERSION),
         provider=ModelProvider.HF,
         repo_id=config.settings["hf_repo_id"],
         comp_id=config.settings["competition_id"],
