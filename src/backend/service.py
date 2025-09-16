@@ -39,6 +39,7 @@ from core.db.models import EvaluationStatus
 from core.log import get_logger
 from core.messages import (
     EvalJobMessage,
+    SetWeightsMessage,
 )
 from core.schemas import ChainCommitmentResponse
 
@@ -46,6 +47,7 @@ from .config import BackendConfig
 from .models import (
     BackendEvaluationJob,
     BackendEvaluationJobStatus,
+    BackendEvaluationResult,
     BackendState,
     Competition,
     MinerSubmission,
@@ -320,6 +322,135 @@ class BackendService:
             except Exception as e:
                 logger.error(f"Error in heartbeat monitor: {e}")
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+    async def _score_evaluations(self) -> dict[SS58Address, float]:
+        """Score completed evaluations."""
+        # fetch backend eval results (BackendEvaluationResult), categorize by competition, score the miner hotkeys based on their success rates and avg reward and store them in a dictionary. winner takes all
+        if self.async_session:
+            async with self.async_session() as session:
+                result = await session.execute(
+                    select(BackendEvaluationResult).where(
+                        BackendEvaluationResult.status == EvaluationStatus.COMPLETED
+                    )
+                )
+                results = result.scalars().all()
+                logger.info(f"Fetched {len(results)} completed evaluation results")
+                # fetch competitions from the database, and categorize results by competition
+                comp_result = await session.execute(select(Competition))
+                competitions = {c.id: c for c in comp_result.scalars()}
+                categorized_results: Dict[str, List[BackendEvaluationResult]] = {}
+                for res in results:
+                    if res.competition_id not in categorized_results:
+                        categorized_results[res.competition_id] = []
+                    categorized_results[res.competition_id].append(res)
+                # score backend evaluations by their success rates and avg reward per competition. the weight of each competition is determined by the competition's "points" attribute vs. the points of other competitions
+                total_points = sum(c.points for c in competitions.values())
+                for comp_id, res_list in categorized_results.items():
+                    competition = competitions.get(comp_id)
+                    if not competition:
+                        continue
+                    comp_weight = (
+                        competition.points / total_points if total_points > 0 else 0
+                    )
+                    miner_scores: Dict[str, float] = {}
+                    for res in res_list:
+                        if res.miner_hotkey not in miner_scores:
+                            miner_scores[res.miner_hotkey] = 0.0
+                    # winner takes all scoring - miners with success rate of 1.0 and highest avg reward get score of comp_weight, others get zero
+                    # so if a miner has success rate of 1.0, and avg reward of 69 vs other miners who have 68, 42, 54, etc. then it gets a score of comp_weight
+                    max_avg_reward = max(
+                        (
+                            sum(r.reward for r in res_list if r.miner_hotkey == miner)
+                            / len([r for r in res_list if r.miner_hotkey == miner])
+                        )
+                        for miner in miner_scores.keys()
+                    )
+                    for miner in miner_scores.keys():
+                        miner_res = [r for r in res_list if r.miner_hotkey == miner]
+                        success_rate = (
+                            len(
+                                [
+                                    r
+                                    for r in miner_res
+                                    if r.status == EvaluationStatus.COMPLETED
+                                ]
+                            )
+                            / len(miner_res)
+                            if len(miner_res) > 0
+                            else 0
+                        )
+                        avg_reward = (
+                            sum(r.reward for r in miner_res) / len(miner_res)
+                            if len(miner_res) > 0
+                            else 0
+                        )
+                        if success_rate == 1.0 and avg_reward == max_avg_reward:
+                            miner_scores[miner] = comp_weight
+                        else:
+                            miner_scores[miner] = 0.0
+
+            # normalize miner scores by dividing by the max score
+            max_score = max(miner_scores.values()) if miner_scores else 1.0
+            if max_score > 0:
+                for miner in miner_scores.keys():
+                    miner_scores[miner] /= max_score
+
+            return miner_scores
+
+    async def _broadcast_and_set_weights(self) -> None:
+        """Broadcast new weights to connected validators and set on chain."""
+        try:
+            if not self.substrate:
+                logger.error("Substrate not initialized")
+                return
+            if not self.metagraph:
+                logger.error("Metagraph not initialized")
+                return
+
+            miner_scores = await self._score_evaluations()
+            # get node uids from metagraph based on their hotkeys
+            nodes = self.metagraph.nodes if self.metagraph else {}
+            miner_hotkeys = miner_scores.keys()
+
+            miner_uids: List[int] = []
+            weights = List[float] = []
+
+            for hotkey in miner_hotkeys:
+                node = nodes.get(hotkey)
+                if node:
+                    miner_uids.append(node.uid)
+                    weights.append(miner_scores[hotkey])
+
+            if not miner_scores:
+                logger.info("No miner scores to broadcast")
+                return
+
+            # Broadcast to validators
+            weight_msg = SetWeightsMessage(weights=weights, miner_uids=miner_uids)
+            weights_msg_str = weight_msg.model_dump_json()
+            broadcast_count = 0
+            failed_connections = []
+
+            for conn_id, ws in list(self.active_connections.items()):
+                try:
+                    await ws.send_text(weights_msg_str)
+                    broadcast_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to send to {conn_id}: {e}")
+                    failed_connections.append(conn_id)
+
+            # Clean up failed connections
+            for conn_id in failed_connections:
+                if conn_id in self.active_connections:
+                    del self.active_connections[conn_id]
+                if conn_id in self.validator_connections:
+                    del self.validator_connections[conn_id]
+
+            logger.info(
+                f"Broadcasted weight update to {broadcast_count} validators:\n{weights_msg_str}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to broadcast weights: {e}")
 
     async def _get_latest_block(self) -> int:
         """Get latest block from chain.

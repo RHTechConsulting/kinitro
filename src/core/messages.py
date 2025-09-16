@@ -72,6 +72,15 @@ class EvalResultMessage(SQLModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SetWeightsMessage(SQLModel):
+    """Message for sending model weights from backend to validators."""
+
+    message_type: MessageType = MessageType.EVAL_RESULT
+    weights: list[float]
+    miner_uids: list[int]
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ValidatorRegisterMessage(SQLModel):
     """Message for validator registration with backend."""
 
