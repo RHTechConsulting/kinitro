@@ -120,8 +120,8 @@ class BackendService:
         self.thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     async def startup(self) -> None:
-        """Initialize the backend service."""
-        logger.info("Starting Kinitro Backend Service")
+        """Initialize the backend service without starting background tasks."""
+        logger.info("Initializing Kinitro Backend Service")
 
         # Initialize database first
         await self._init_database()
@@ -132,8 +132,12 @@ class BackendService:
         # Load backend state
         await self._load_backend_state()
 
-        # Start background tasks with delays to ensure proper sequencing
         self._running = True
+        logger.info("Kinitro Backend Service initialized successfully")
+
+    async def start_background_tasks(self) -> None:
+        """Start background tasks after FastAPI is ready."""
+        logger.info("Starting background tasks")
 
         # Start core monitoring tasks first
         self._chain_monitor_task = asyncio.create_task(self._monitor_chain())
@@ -160,7 +164,7 @@ class BackendService:
         )
 
         logger.info(
-            f"Kinitro Backend Service started successfully. "
+            f"All background tasks started. "
             f"Score evaluation interval: {self.score_evaluation_interval}s, "
             f"Weight broadcast interval: {self.weight_broadcast_interval}s"
         )

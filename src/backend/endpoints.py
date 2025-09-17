@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
@@ -63,7 +64,12 @@ backend_service = BackendService(config)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage backend service lifecycle."""
+    # Initialize the service but don't start background tasks yet
     await backend_service.startup()
+
+    # Start background tasks after FastAPI is ready
+    asyncio.create_task(backend_service.start_background_tasks())
+
     yield
     await backend_service.shutdown()
 
