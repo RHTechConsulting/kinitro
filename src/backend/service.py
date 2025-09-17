@@ -33,6 +33,8 @@ from backend.constants import (
     DEFAULT_MAX_COMMITMENT_LOOKBACK,
     HEARTBEAT_INTERVAL,
     MAX_WORKERS,
+    SCORE_EVALUATION_INTERVAL,
+    WEIGHT_BROADCAST_INTERVAL,
 )
 from core.chain import query_commitments_from_substrate
 from core.db.models import EvaluationStatus
@@ -76,6 +78,14 @@ class BackendService:
             "chain_sync_interval", DEFAULT_CHAIN_SYNC_INTERVAL
         )
 
+        # Scoring and weight broadcast intervals
+        self.score_evaluation_interval = config.settings.get(
+            "score_evaluation_interval", SCORE_EVALUATION_INTERVAL
+        )
+        self.weight_broadcast_interval = config.settings.get(
+            "weight_broadcast_interval", WEIGHT_BROADCAST_INTERVAL
+        )
+
         # Chain connection objects
         # Using Any since fiber's SubstrateInterface is from async_substrate_interface
         self.substrate: Optional[Any] = (
@@ -91,6 +101,11 @@ class BackendService:
         self._running = False
         self._chain_monitor_task = None
         self._heartbeat_monitor_task = None
+        self._score_evaluation_task = None
+        self._weight_broadcast_task = None
+
+        # Store latest scores for weight broadcasting
+        self._latest_miner_scores: Dict[SS58Address, float] = {}
 
         # ID generator
         self.id_generator = SnowflakeGenerator(42)
@@ -121,8 +136,18 @@ class BackendService:
         self._heartbeat_monitor_task = asyncio.create_task(
             self._monitor_validator_heartbeats()
         )
+        self._score_evaluation_task = asyncio.create_task(
+            self._periodic_score_evaluation()
+        )
+        self._weight_broadcast_task = asyncio.create_task(
+            self._periodic_weight_broadcast()
+        )
 
-        logger.info("Kinitro Backend Service started successfully")
+        logger.info(
+            f"Kinitro Backend Service started successfully. "
+            f"Score evaluation interval: {self.score_evaluation_interval}s, "
+            f"Weight broadcast interval: {self.weight_broadcast_interval}s"
+        )
 
     async def shutdown(self) -> None:
         """Shutdown the backend service."""
@@ -131,19 +156,21 @@ class BackendService:
         self._running = False
 
         # Cancel background tasks
-        if self._chain_monitor_task:
-            self._chain_monitor_task.cancel()
-            try:
-                await self._chain_monitor_task
-            except asyncio.CancelledError as e:
-                logger.error(f"Chain monitor task cancelled: {e}")
+        tasks_to_cancel = [
+            (self._chain_monitor_task, "chain monitor"),
+            (self._heartbeat_monitor_task, "heartbeat monitor"),
+            (self._score_evaluation_task, "score evaluation"),
+            (self._weight_broadcast_task, "weight broadcast"),
+        ]
 
-        if self._heartbeat_monitor_task:
-            self._heartbeat_monitor_task.cancel()
-            try:
-                await self._heartbeat_monitor_task
-            except asyncio.CancelledError as e:
-                logger.error(f"Heartbeat monitor task cancelled: {e}")
+        for task, name in tasks_to_cancel:
+            if task:
+                logger.info(f"Cancelling {name} task")
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError as e:
+                    logger.error(f"{name} task cancelled: {e}")
 
         # Close WebSocket connections
         for ws in self.active_connections.values():
@@ -324,81 +351,216 @@ class BackendService:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def _score_evaluations(self) -> dict[SS58Address, float]:
-        """Score completed evaluations."""
-        # fetch backend eval results (BackendEvaluationResult), categorize by competition, score the miner hotkeys based on their success rates and avg reward and store them in a dictionary. winner takes all
-        if self.async_session:
-            async with self.async_session() as session:
-                result = await session.execute(
-                    select(BackendEvaluationResult).where(
-                        BackendEvaluationResult.status == EvaluationStatus.COMPLETED
-                    )
-                )
-                results = result.scalars().all()
-                logger.info(f"Fetched {len(results)} completed evaluation results")
-                # fetch competitions from the database, and categorize results by competition
-                comp_result = await session.execute(select(Competition))
-                competitions = {c.id: c for c in comp_result.scalars()}
-                categorized_results: Dict[str, List[BackendEvaluationResult]] = {}
-                for res in results:
-                    if res.competition_id not in categorized_results:
-                        categorized_results[res.competition_id] = []
-                    categorized_results[res.competition_id].append(res)
-                # score backend evaluations by their success rates and avg reward per competition. the weight of each competition is determined by the competition's "points" attribute vs. the points of other competitions
-                total_points = sum(c.points for c in competitions.values())
-                for comp_id, res_list in categorized_results.items():
-                    competition = competitions.get(comp_id)
-                    if not competition:
-                        continue
-                    comp_weight = (
-                        competition.points / total_points if total_points > 0 else 0
-                    )
-                    miner_scores: Dict[str, float] = {}
-                    for res in res_list:
-                        if res.miner_hotkey not in miner_scores:
-                            miner_scores[res.miner_hotkey] = 0.0
-                    # winner takes all scoring - miners with success rate of 1.0 and highest avg reward get score of comp_weight, others get zero
-                    # so if a miner has success rate of 1.0, and avg reward of 69 vs other miners who have 68, 42, 54, etc. then it gets a score of comp_weight
-                    max_avg_reward = max(
-                        (
-                            sum(r.reward for r in res_list if r.miner_hotkey == miner)
-                            / len([r for r in res_list if r.miner_hotkey == miner])
-                        )
-                        for miner in miner_scores.keys()
-                    )
-                    for miner in miner_scores.keys():
-                        miner_res = [r for r in res_list if r.miner_hotkey == miner]
-                        success_rate = (
-                            len(
-                                [
-                                    r
-                                    for r in miner_res
-                                    if r.status == EvaluationStatus.COMPLETED
-                                ]
-                            )
-                            / len(miner_res)
-                            if len(miner_res) > 0
-                            else 0
-                        )
-                        avg_reward = (
-                            sum(r.reward for r in miner_res) / len(miner_res)
-                            if len(miner_res) > 0
-                            else 0
-                        )
-                        if success_rate == 1.0 and avg_reward == max_avg_reward:
-                            miner_scores[miner] = comp_weight
-                        else:
-                            miner_scores[miner] = 0.0
+        """
+        Score completed evaluations with winner-takes-all per competition.
 
-            # normalize miner scores by dividing by the max score
-            max_score = max(miner_scores.values()) if miner_scores else 1.0
-            if max_score > 0:
-                for miner in miner_scores.keys():
-                    miner_scores[miner] /= max_score
+        Scoring logic:
+        - Miners must have 1.0 success rate to be considered
+        - Miners must pass minimum avg reward threshold per competition
+        - New miners must exceed current leader by win margin percentage to become leader
+        - Current leader retains position if no challenger exceeds margin
+        - Final scores are normalized based on competition points
+
+        Returns:
+            dict[SS58Address, float]: Mapping of miner hotkeys to their normalized scores (0-1).
+        """
+        async with self.async_session() as session:
+            # Fetch all active competitions
+            competitions_result = await session.execute(
+                select(Competition).where(Competition.active)
+            )
+            competitions = competitions_result.scalars().all()
+
+            if not competitions:
+                logger.info("No active competitions found for scoring")
+                return {}
+
+            # Calculate total points across all competitions
+            total_points = sum(comp.points for comp in competitions)
+            if total_points == 0:
+                logger.warning("Total competition points is 0")
+                return {}
+
+            # Dictionary to store winner scores
+            miner_scores: dict[SS58Address, float] = {}
+
+            for competition in competitions:
+                # Get all evaluation results for this competition
+                results_query = select(BackendEvaluationResult).where(
+                    BackendEvaluationResult.competition_id == competition.id
+                )
+                results = await session.execute(results_query)
+                eval_results = results.scalars().all()
+
+                if not eval_results:
+                    logger.debug(
+                        f"No evaluation results for competition {competition.id}"
+                    )
+                    continue
+
+                # Find eligible challengers
+                eligible_miners: List[tuple[str, float]] = []
+
+                for result in eval_results:
+                    if result.success_rate is None or result.avg_reward is None:
+                        continue
+
+                    # Check eligibility criteria
+                    if result.success_rate != 1.0:
+                        logger.debug(
+                            f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
+                            f"success_rate={result.success_rate:.3f} != 1.0"
+                        )
+                        continue
+
+                    if result.avg_reward < competition.min_avg_reward:
+                        logger.debug(
+                            f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
+                            f"avg_reward={result.avg_reward:.3f} < min_threshold={competition.min_avg_reward}"
+                        )
+                        continue
+
+                    eligible_miners.append((result.miner_hotkey, result.avg_reward))
+
+                winner_hotkey = None
+
+                if not eligible_miners:
+                    # If no eligible miners and there's a current leader, they retain position
+                    if competition.current_leader_hotkey:
+                        logger.info(
+                            f"Competition {competition.id}: Current leader {competition.current_leader_hotkey} "
+                            f"retains position (no eligible challengers)"
+                        )
+                        winner_hotkey = competition.current_leader_hotkey
+                    else:
+                        logger.info(
+                            f"Competition {competition.id}: No eligible miners found"
+                        )
+                        continue
+                else:
+                    # Sort by reward to find best performer
+                    eligible_miners.sort(key=lambda x: x[1], reverse=True)
+                    best_miner, best_reward = eligible_miners[0]
+
+                    # Determine if we have a new leader or retain current
+                    if competition.current_leader_hotkey:
+                        # Check if best miner is already the leader
+                        if best_miner == competition.current_leader_hotkey:
+                            winner_hotkey = competition.current_leader_hotkey
+                            logger.info(
+                                f"Competition {competition.id}: Current leader {winner_hotkey} "
+                                f"retains position with avg_reward={best_reward:.3f}"
+                            )
+                        else:
+                            # Challenger must exceed current leader by win margin
+                            required_reward = (
+                                competition.current_leader_reward or 0
+                            ) * (1 + competition.win_margin_pct)
+
+                            if best_reward > required_reward:
+                                # New leader!
+                                winner_hotkey = best_miner
+                                winner_reward = best_reward
+
+                                logger.info(
+                                    f"Competition {competition.id}: New leader {winner_hotkey} "
+                                    f"(avg_reward={best_reward:.3f}) defeats previous leader "
+                                    f"{competition.current_leader_hotkey} (required={required_reward:.3f})"
+                                )
+
+                                # Update competition with new leader
+                                competition.current_leader_hotkey = winner_hotkey
+                                competition.current_leader_reward = winner_reward
+                                competition.leader_updated_at = datetime.now(
+                                    timezone.utc
+                                )
+                            else:
+                                # Current leader retains position
+                                winner_hotkey = competition.current_leader_hotkey
+                                logger.info(
+                                    f"Competition {competition.id}: Current leader {winner_hotkey} "
+                                    f"retains position. Challenger {best_miner} (avg_reward={best_reward:.3f}) "
+                                    f"didn't exceed required margin {required_reward:.3f}"
+                                )
+                    else:
+                        # No current leader, best miner becomes first leader
+                        winner_hotkey = best_miner
+                        winner_reward = best_reward
+
+                        logger.info(
+                            f"Competition {competition.id}: First leader {winner_hotkey} "
+                            f"established with avg_reward={best_reward:.3f}"
+                        )
+
+                        # Update competition with first leader
+                        competition.current_leader_hotkey = winner_hotkey
+                        competition.current_leader_reward = winner_reward
+                        competition.leader_updated_at = datetime.now(timezone.utc)
+
+                # Award points to current leader (normalized)
+                if winner_hotkey:
+                    normalized_score = competition.points / total_points
+                    miner_scores[winner_hotkey] = (
+                        miner_scores.get(winner_hotkey, 0.0) + normalized_score
+                    )
+                    logger.info(
+                        f"Competition {competition.id}: Awarded {normalized_score:.4f} normalized score to {winner_hotkey}"
+                    )
+
+            # Commit any leader updates to database
+            await session.commit()
+
+            # Log final scores
+            if miner_scores:
+                logger.info(f"Final miner scores: {len(miner_scores)} miners scored")
+                for hotkey, score in sorted(
+                    miner_scores.items(), key=lambda x: x[1], reverse=True
+                )[:10]:
+                    logger.info(f"  {hotkey}: {score:.4f}")
+            else:
+                logger.info("No miners received scores")
 
             return miner_scores
 
+    async def _periodic_score_evaluation(self) -> None:
+        """Periodically evaluate and update miner scores."""
+        logger.info("Starting periodic score evaluation task")
+
+        while self._running:
+            try:
+                logger.info("Running score evaluation cycle")
+                miner_scores = await self._score_evaluations()
+
+                # Store latest scores for weight broadcasting
+                self._latest_miner_scores = miner_scores
+
+                logger.info(
+                    f"Score evaluation complete. {len(miner_scores)} miners scored."
+                )
+
+            except Exception as e:
+                logger.error(f"Error in periodic score evaluation: {e}")
+
+            # Wait for next evaluation cycle
+            await asyncio.sleep(self.score_evaluation_interval)
+
+    async def _periodic_weight_broadcast(self) -> None:
+        """Periodically broadcast weights to validators and set on chain."""
+        logger.info("Starting periodic weight broadcast task")
+
+        while self._running:
+            try:
+                logger.info("Running weight broadcast cycle")
+                await self._broadcast_and_set_weights()
+
+            except Exception as e:
+                logger.error(f"Error in periodic weight broadcast: {e}")
+
+            # Wait for next broadcast cycle
+            await asyncio.sleep(self.weight_broadcast_interval)
+
     async def _broadcast_and_set_weights(self) -> None:
-        """Broadcast new weights to connected validators and set on chain."""
+        """Broadcast weights to connected validators and set on chain using latest scores."""
         try:
             if not self.substrate:
                 logger.error("Substrate not initialized")
@@ -407,7 +569,8 @@ class BackendService:
                 logger.error("Metagraph not initialized")
                 return
 
-            miner_scores = await self._score_evaluations()
+            # Use cached scores from periodic evaluation
+            miner_scores = self._latest_miner_scores.copy()
             # get node uids from metagraph based on their hotkeys
             nodes = self.metagraph.nodes if self.metagraph else {}
             miner_hotkeys = miner_scores.keys()

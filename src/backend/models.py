@@ -24,6 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.sql import func
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
+from backend.constants import DEFAULT_MIN_AVG_REWARD, DEFAULT_WIN_MARGIN_PCT
 from core.db.models import EvaluationStatus, SnowflakeId, TimestampMixin
 
 # Type aliases for consistency
@@ -39,6 +40,8 @@ class CompetitionCreateRequest(SQLModel):
     description: Optional[str] = None
     benchmarks: List[dict]
     points: int = Field(gt=0)
+    min_avg_reward: float = Field(default=DEFAULT_MIN_AVG_REWARD)
+    win_margin_pct: float = Field(default=DEFAULT_WIN_MARGIN_PCT)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 
@@ -51,6 +54,11 @@ class CompetitionResponse(SQLModel):
     description: Optional[str]
     benchmarks: List[dict]
     points: int
+    min_avg_reward: float
+    win_margin_pct: float
+    current_leader_hotkey: Optional[str]
+    current_leader_reward: Optional[float]
+    leader_updated_at: Optional[datetime]
     active: bool
     start_time: Optional[datetime]
     end_time: Optional[datetime]
@@ -178,6 +186,27 @@ class Competition(TimestampMixin, SQLModel, table=True):
 
     # Points allocated to this competition for reward distribution
     points: int = Field(nullable=False)
+
+    # Scoring thresholds
+    min_avg_reward: float = Field(
+        default=DEFAULT_MIN_AVG_REWARD,
+        nullable=False,
+        sa_column_kwargs={"server_default": str(DEFAULT_MIN_AVG_REWARD)},
+    )
+    win_margin_pct: float = Field(
+        default=DEFAULT_WIN_MARGIN_PCT,
+        nullable=False,
+        sa_column_kwargs={"server_default": str(DEFAULT_WIN_MARGIN_PCT)},
+    )
+
+    # Current leader tracking
+    current_leader_hotkey: Optional[str] = Field(
+        default=None, max_length=48, nullable=True
+    )
+    current_leader_reward: Optional[float] = Field(default=None, nullable=True)
+    leader_updated_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
+    )
 
     # Competition status
     active: bool = Field(

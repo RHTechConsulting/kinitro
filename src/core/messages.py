@@ -24,6 +24,7 @@ class MessageType(StrEnum):
     HEARTBEAT_ACK = "heartbeat_ack"
     REGISTRATION_ACK = "registration_ack"
     RESULT_ACK = "result_ack"
+    SET_WEIGHTS = "set_weights"
     EPISODE_DATA = "episode_data"
     EPISODE_STEP_DATA = "episode_step_data"
     ERROR = "error"
@@ -75,7 +76,7 @@ class EvalResultMessage(SQLModel):
 class SetWeightsMessage(SQLModel):
     """Message for sending model weights from backend to validators."""
 
-    message_type: MessageType = MessageType.EVAL_RESULT
+    message_type: MessageType = MessageType.SET_WEIGHTS
     weights: list[float]
     miner_uids: list[int]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
