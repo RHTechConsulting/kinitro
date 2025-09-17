@@ -20,3 +20,7 @@ DEFAULT_WIN_MARGIN_PCT = 0.05  # 5% margin required to win
 # Scoring and weight setting intervals (in seconds)
 SCORE_EVALUATION_INTERVAL = 300  # 5 minutes
 WEIGHT_BROADCAST_INTERVAL = 600  # 10 minutes
+
+# Task startup delays (in seconds)
+SCORE_EVALUATION_STARTUP_DELAY = 10
+WEIGHT_BROADCAST_STARTUP_DELAY = 10

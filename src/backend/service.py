@@ -34,7 +34,9 @@ from backend.constants import (
     HEARTBEAT_INTERVAL,
     MAX_WORKERS,
     SCORE_EVALUATION_INTERVAL,
+    SCORE_EVALUATION_STARTUP_DELAY,
     WEIGHT_BROADCAST_INTERVAL,
+    WEIGHT_BROADCAST_STARTUP_DELAY,
 )
 from core.chain import query_commitments_from_substrate
 from core.db.models import EvaluationStatus
@@ -130,15 +132,29 @@ class BackendService:
         # Load backend state
         await self._load_backend_state()
 
-        # Start background tasks
+        # Start background tasks with delays to ensure proper sequencing
         self._running = True
+
+        # Start core monitoring tasks first
         self._chain_monitor_task = asyncio.create_task(self._monitor_chain())
         self._heartbeat_monitor_task = asyncio.create_task(
             self._monitor_validator_heartbeats()
         )
+
+        # Delay before starting scoring
+        logger.info(
+            f"Starting score evaluation task in {SCORE_EVALUATION_STARTUP_DELAY} seconds..."
+        )
+        await asyncio.sleep(SCORE_EVALUATION_STARTUP_DELAY)
         self._score_evaluation_task = asyncio.create_task(
             self._periodic_score_evaluation()
         )
+
+        # Delay before starting weight broadcast
+        logger.info(
+            f"Starting weight broadcast task in {WEIGHT_BROADCAST_STARTUP_DELAY} seconds..."
+        )
+        await asyncio.sleep(WEIGHT_BROADCAST_STARTUP_DELAY)
         self._weight_broadcast_task = asyncio.create_task(
             self._periodic_weight_broadcast()
         )
@@ -576,12 +592,12 @@ class BackendService:
             miner_hotkeys = miner_scores.keys()
 
             miner_uids: List[int] = []
-            weights = List[float] = []
+            weights: List[float] = []
 
             for hotkey in miner_hotkeys:
                 node = nodes.get(hotkey)
                 if node:
-                    miner_uids.append(node.uid)
+                    miner_uids.append(node.node_id)
                     weights.append(miner_scores[hotkey])
 
             if not miner_scores:
