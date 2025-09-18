@@ -7,10 +7,11 @@ via WebSocket and receives evaluation jobs from there
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Optional
 
 import asyncpg
 import websockets
+from fiber import SubstrateInterface
 from fiber.chain.interface import get_substrate
 from fiber.chain.metagraph import Metagraph
 from fiber.chain.weights import set_node_weights
@@ -70,9 +71,9 @@ class WebSocketValidator(Neuron):
         self.q: Optional[Queries] = None
 
         # Chain connection objects
-        self.substrate: Optional[Any] = None  # SubstrateInterface from fiber
-        self.metagraph: Optional[Metagraph] = None
-        self.validator_node_id: Optional[int] = None  # Our node ID on the chain
+        self.substrate: SubstrateInterface = None
+        self.metagraph: Metagraph = None
+        self.validator_node_id: int = None  # Our node ID on the chain
 
         logger.info(f"WebSocket Validator initialized for hotkey: {self.hotkey}")
 

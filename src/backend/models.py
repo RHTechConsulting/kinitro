@@ -62,7 +62,7 @@ class CompetitionResponse(SQLModel):
     min_avg_reward: float
     win_margin_pct: float
     min_success_rate: float
-    current_leader_hotkey: Optional[str]
+    current_leader_hotkey: Optional[SS58Address]
     current_leader_reward: Optional[float]
     leader_updated_at: Optional[datetime]
     active: bool
@@ -211,7 +211,7 @@ class Competition(TimestampMixin, SQLModel, table=True):
     )
 
     # Current leader tracking
-    current_leader_hotkey: Optional[str] = Field(
+    current_leader_hotkey: Optional[SS58Address] = Field(
         default=None, max_length=48, nullable=True
     )
     current_leader_reward: Optional[float] = Field(default=None, nullable=True)

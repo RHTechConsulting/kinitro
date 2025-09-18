@@ -176,10 +176,10 @@ class BackendService:
 
         # Cancel background tasks
         tasks_to_cancel = [
-            (self._chain_monitor_task, "chain monitor"),
-            (self._heartbeat_monitor_task, "heartbeat monitor"),
-            (self._score_evaluation_task, "score evaluation"),
-            (self._weight_broadcast_task, "weight broadcast"),
+            (self._chain_monitor_task, "chain_monitor"),
+            (self._heartbeat_monitor_task, "heartbeat_monitor"),
+            (self._score_evaluation_task, "score_evaluation"),
+            (self._weight_broadcast_task, "weight_broadcast"),
         ]
 
         for task, name in tasks_to_cancel:
@@ -397,9 +397,6 @@ class BackendService:
 
             # Calculate total points across all competitions
             total_points = sum(comp.points for comp in competitions)
-            if total_points == 0:
-                logger.warning("Total competition points is 0")
-                return {}
 
             # Dictionary to store winner scores
             miner_scores: dict[SS58Address, float] = {}
@@ -519,7 +516,12 @@ class BackendService:
 
                 # Award points to current leader (normalized)
                 if winner_hotkey:
-                    normalized_score = competition.points / total_points
+                    # Only normalize if there are points to distribute
+                    if total_points > 0:
+                        normalized_score = competition.points / total_points
+                    else:
+                        normalized_score = 0.0
+
                     miner_scores[winner_hotkey] = (
                         miner_scores.get(winner_hotkey, 0.0) + normalized_score
                     )
@@ -593,16 +595,15 @@ class BackendService:
             miner_scores = self._latest_miner_scores.copy()
             # get node uids from metagraph based on their hotkeys
             nodes = self.metagraph.nodes if self.metagraph else {}
-            miner_hotkeys = miner_scores.keys()
 
             miner_uids: List[int] = []
             weights: List[float] = []
 
-            for hotkey in miner_hotkeys:
+            for hotkey, weight in miner_scores.items():
                 node = nodes.get(hotkey)
                 if node:
                     miner_uids.append(node.node_id)
-                    weights.append(miner_scores[hotkey])
+                    weights.append(weight)
 
             if not miner_scores:
                 logger.info("No miner scores to broadcast")
