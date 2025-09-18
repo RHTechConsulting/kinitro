@@ -369,6 +369,91 @@ class BackendService:
                 logger.error(f"Error in heartbeat monitor: {e}")
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
 
+    def _is_miner_eligible(
+        self,
+        result: BackendEvaluationResult,
+        competition: Competition,
+    ) -> bool:
+        """Check if a miner meets eligibility criteria for a competition."""
+        if result.success_rate is None or result.avg_reward is None:
+            return False
+
+        if result.success_rate < competition.min_success_rate:
+            logger.debug(
+                f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
+                f"success_rate={result.success_rate:.3f} < min_threshold={competition.min_success_rate:.3f}"
+            )
+            return False
+
+        if result.avg_reward < competition.min_avg_reward:
+            logger.debug(
+                f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
+                f"avg_reward={result.avg_reward:.3f} < min_threshold={competition.min_avg_reward}"
+            )
+            return False
+
+        return True
+
+    def _determine_competition_winner(
+        self,
+        competition: Competition,
+        eligible_miners: List[tuple[str, float]],
+    ) -> tuple[Optional[str], Optional[float]]:
+        """Determine the winner of a competition based on eligible miners."""
+        if not eligible_miners:
+            if competition.current_leader_hotkey:
+                logger.info(
+                    f"Competition {competition.id}: Current leader {competition.current_leader_hotkey} "
+                    f"retains position (no eligible challengers)"
+                )
+                return (
+                    competition.current_leader_hotkey,
+                    competition.current_leader_reward,
+                )
+            logger.info(f"Competition {competition.id}: No eligible miners found")
+            return None, None
+
+        # Sort by reward to find best performer
+        eligible_miners.sort(key=lambda x: x[1], reverse=True)
+        best_miner, best_reward = eligible_miners[0]
+
+        # No current leader - best miner becomes first leader
+        if not competition.current_leader_hotkey:
+            logger.info(
+                f"Competition {competition.id}: First leader {best_miner} "
+                f"established with avg_reward={best_reward:.3f}"
+            )
+            return best_miner, best_reward
+
+        # Check if best miner is already the leader
+        if best_miner == competition.current_leader_hotkey:
+            logger.info(
+                f"Competition {competition.id}: Current leader {best_miner} "
+                f"retains position with avg_reward={best_reward:.3f}"
+            )
+            return competition.current_leader_hotkey, competition.current_leader_reward
+
+        # Challenger must exceed current leader by win margin
+        required_reward = (competition.current_leader_reward or 0) * (
+            1 + competition.win_margin_pct
+        )
+
+        if best_reward > required_reward:
+            logger.info(
+                f"Competition {competition.id}: New leader {best_miner} "
+                f"(avg_reward={best_reward:.3f}) defeats previous leader "
+                f"{competition.current_leader_hotkey} (required={required_reward:.3f})"
+            )
+            return best_miner, best_reward
+
+        # Current leader retains position
+        logger.info(
+            f"Competition {competition.id}: Current leader {competition.current_leader_hotkey} "
+            f"retains position. Challenger {best_miner} (avg_reward={best_reward:.3f}) "
+            f"didn't exceed required margin {required_reward:.3f}"
+        )
+        return competition.current_leader_hotkey, competition.current_leader_reward
+
     async def _score_evaluations(self) -> dict[SS58Address, float]:
         """
         Score completed evaluations with winner-takes-all per competition.
@@ -378,6 +463,7 @@ class BackendService:
         - Miners must pass minimum avg reward threshold per competition
         - New miners must exceed current leader by win margin percentage to become leader
         - Current leader retains position if no challenger exceeds margin
+        - Each miner can only win ONE competition (first-win policy if appearing in multiple)
         - Final scores are normalized based on competition points
 
         Returns:
@@ -417,119 +503,41 @@ class BackendService:
 
                 # Find eligible challengers
                 eligible_miners: List[tuple[str, float]] = []
-
                 for result in eval_results:
-                    if result.success_rate is None or result.avg_reward is None:
-                        continue
+                    if self._is_miner_eligible(result, competition):
+                        eligible_miners.append((result.miner_hotkey, result.avg_reward))
 
-                    # Check eligibility criteria
-                    if result.success_rate < competition.min_success_rate:
-                        logger.debug(
-                            f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
-                            f"success_rate={result.success_rate:.3f} < min_threshold={competition.min_success_rate:.3f}"
-                        )
-                        continue
+                # Determine competition winner
+                winner_hotkey, winner_reward = self._determine_competition_winner(
+                    competition, eligible_miners
+                )
 
-                    if result.avg_reward < competition.min_avg_reward:
-                        logger.debug(
-                            f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
-                            f"avg_reward={result.avg_reward:.3f} < min_threshold={competition.min_avg_reward}"
-                        )
-                        continue
+                if not winner_hotkey:
+                    continue
 
-                    eligible_miners.append((result.miner_hotkey, result.avg_reward))
+                # Update competition leader if changed
+                if (
+                    winner_hotkey != competition.current_leader_hotkey
+                    or winner_reward != competition.current_leader_reward
+                ):
+                    competition.current_leader_hotkey = winner_hotkey
+                    competition.current_leader_reward = winner_reward
+                    competition.leader_updated_at = datetime.now(timezone.utc)
 
-                winner_hotkey = None
+                # Award points to winner (check for duplicate wins first)
+                normalized_score = competition.points / total_points
 
-                if not eligible_miners:
-                    # If no eligible miners and there's a current leader, they retain position
-                    if competition.current_leader_hotkey:
-                        logger.info(
-                            f"Competition {competition.id}: Current leader {competition.current_leader_hotkey} "
-                            f"retains position (no eligible challengers)"
-                        )
-                        winner_hotkey = competition.current_leader_hotkey
-                    else:
-                        logger.info(
-                            f"Competition {competition.id}: No eligible miners found"
-                        )
-                        continue
-                else:
-                    # Sort by reward to find best performer
-                    eligible_miners.sort(key=lambda x: x[1], reverse=True)
-                    best_miner, best_reward = eligible_miners[0]
-
-                    # Determine if we have a new leader or retain current
-                    if competition.current_leader_hotkey:
-                        # Check if best miner is already the leader
-                        if best_miner == competition.current_leader_hotkey:
-                            winner_hotkey = competition.current_leader_hotkey
-                            logger.info(
-                                f"Competition {competition.id}: Current leader {winner_hotkey} "
-                                f"retains position with avg_reward={best_reward:.3f}"
-                            )
-                        else:
-                            # Challenger must exceed current leader by win margin
-                            required_reward = (
-                                competition.current_leader_reward or 0
-                            ) * (1 + competition.win_margin_pct)
-
-                            if best_reward > required_reward:
-                                # New leader!
-                                winner_hotkey = best_miner
-                                winner_reward = best_reward
-
-                                logger.info(
-                                    f"Competition {competition.id}: New leader {winner_hotkey} "
-                                    f"(avg_reward={best_reward:.3f}) defeats previous leader "
-                                    f"{competition.current_leader_hotkey} (required={required_reward:.3f})"
-                                )
-
-                                # Update competition with new leader
-                                competition.current_leader_hotkey = winner_hotkey
-                                competition.current_leader_reward = winner_reward
-                                competition.leader_updated_at = datetime.now(
-                                    timezone.utc
-                                )
-                            else:
-                                # Current leader retains position
-                                winner_hotkey = competition.current_leader_hotkey
-                                logger.info(
-                                    f"Competition {competition.id}: Current leader {winner_hotkey} "
-                                    f"retains position. Challenger {best_miner} (avg_reward={best_reward:.3f}) "
-                                    f"didn't exceed required margin {required_reward:.3f}"
-                                )
-                    else:
-                        # No current leader, best miner becomes first leader
-                        winner_hotkey = best_miner
-                        winner_reward = best_reward
-
-                        logger.info(
-                            f"Competition {competition.id}: First leader {winner_hotkey} "
-                            f"established with avg_reward={best_reward:.3f}"
-                        )
-
-                        # Update competition with first leader
-                        competition.current_leader_hotkey = winner_hotkey
-                        competition.current_leader_reward = winner_reward
-                        competition.leader_updated_at = datetime.now(timezone.utc)
-
-                # Award points to current leader (normalized)
-                if winner_hotkey:
-                    normalized_score = competition.points / total_points
-
-                    # Check if miner already has a score from another competition
-                    if winner_hotkey in miner_scores:
-                        logger.warning(
-                            f"Miner {winner_hotkey} already won competition - skipping score from {competition.id}. "
-                            f"Previous score: {miner_scores[winner_hotkey]:.4f}, would have added: {normalized_score:.4f}"
-                        )
-                        continue
-
-                    miner_scores[winner_hotkey] = normalized_score
-                    logger.info(
-                        f"Competition {competition.id}: Awarded {normalized_score:.4f} normalized score to {winner_hotkey}"
+                if winner_hotkey in miner_scores:
+                    logger.warning(
+                        f"Miner {winner_hotkey} already won competition - skipping score from {competition.id}. "
+                        f"Previous score: {miner_scores[winner_hotkey]:.4f}, would have added: {normalized_score:.4f}"
                     )
+                    continue
+
+                miner_scores[winner_hotkey] = normalized_score
+                logger.info(
+                    f"Competition {competition.id}: Awarded {normalized_score:.4f} normalized score to {winner_hotkey}"
+                )
 
             # Commit any leader updates to database
             await session.commit()
