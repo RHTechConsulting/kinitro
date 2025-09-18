@@ -33,12 +33,17 @@ from backend.constants import (
     DEFAULT_MAX_COMMITMENT_LOOKBACK,
     HEARTBEAT_INTERVAL,
     MAX_WORKERS,
+    SCORE_EVALUATION_INTERVAL,
+    SCORE_EVALUATION_STARTUP_DELAY,
+    WEIGHT_BROADCAST_INTERVAL,
+    WEIGHT_BROADCAST_STARTUP_DELAY,
 )
 from core.chain import query_commitments_from_substrate
 from core.db.models import EvaluationStatus
 from core.log import get_logger
 from core.messages import (
     EvalJobMessage,
+    SetWeightsMessage,
 )
 from core.schemas import ChainCommitmentResponse
 
@@ -46,6 +51,7 @@ from .config import BackendConfig
 from .models import (
     BackendEvaluationJob,
     BackendEvaluationJobStatus,
+    BackendEvaluationResult,
     BackendState,
     Competition,
     MinerSubmission,
@@ -55,7 +61,6 @@ from .models import (
 
 logger = get_logger(__name__)
 
-# TODO: implement weight broadcasting and weight setting to connecting validators
 ConnectionId = str  # Unique ID for each WebSocket connection
 
 
@@ -74,6 +79,14 @@ class BackendService:
             "chain_sync_interval", DEFAULT_CHAIN_SYNC_INTERVAL
         )
 
+        # Scoring and weight broadcast intervals
+        self.score_evaluation_interval = config.settings.get(
+            "score_evaluation_interval", SCORE_EVALUATION_INTERVAL
+        )
+        self.weight_broadcast_interval = config.settings.get(
+            "weight_broadcast_interval", WEIGHT_BROADCAST_INTERVAL
+        )
+
         # Chain connection objects
         # Using Any since fiber's SubstrateInterface is from async_substrate_interface
         self.substrate: Optional[Any] = (
@@ -89,6 +102,11 @@ class BackendService:
         self._running = False
         self._chain_monitor_task = None
         self._heartbeat_monitor_task = None
+        self._score_evaluation_task = None
+        self._weight_broadcast_task = None
+
+        # Store latest scores for weight broadcasting
+        self._latest_miner_scores: Dict[SS58Address, float] = {}
 
         # ID generator
         self.id_generator = SnowflakeGenerator(42)
@@ -101,8 +119,8 @@ class BackendService:
         self.thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     async def startup(self) -> None:
-        """Initialize the backend service."""
-        logger.info("Starting Kinitro Backend Service")
+        """Initialize the backend service without starting background tasks."""
+        logger.info("Initializing Kinitro Backend Service")
 
         # Initialize database first
         await self._init_database()
@@ -113,14 +131,42 @@ class BackendService:
         # Load backend state
         await self._load_backend_state()
 
-        # Start background tasks
         self._running = True
+        logger.info("Kinitro Backend Service initialized successfully")
+
+    async def start_background_tasks(self) -> None:
+        """Start background tasks after FastAPI is ready."""
+        logger.info("Starting background tasks")
+
+        # Start core monitoring tasks first
         self._chain_monitor_task = asyncio.create_task(self._monitor_chain())
         self._heartbeat_monitor_task = asyncio.create_task(
             self._monitor_validator_heartbeats()
         )
 
-        logger.info("Kinitro Backend Service started successfully")
+        # Delay before starting scoring
+        logger.info(
+            f"Starting score evaluation task in {SCORE_EVALUATION_STARTUP_DELAY} seconds..."
+        )
+        await asyncio.sleep(SCORE_EVALUATION_STARTUP_DELAY)
+        self._score_evaluation_task = asyncio.create_task(
+            self._periodic_score_evaluation()
+        )
+
+        # Delay before starting weight broadcast
+        logger.info(
+            f"Starting weight broadcast task in {WEIGHT_BROADCAST_STARTUP_DELAY} seconds..."
+        )
+        await asyncio.sleep(WEIGHT_BROADCAST_STARTUP_DELAY)
+        self._weight_broadcast_task = asyncio.create_task(
+            self._periodic_weight_broadcast()
+        )
+
+        logger.info(
+            f"All background tasks started. "
+            f"Score evaluation interval: {self.score_evaluation_interval}s, "
+            f"Weight broadcast interval: {self.weight_broadcast_interval}s"
+        )
 
     async def shutdown(self) -> None:
         """Shutdown the backend service."""
@@ -129,19 +175,21 @@ class BackendService:
         self._running = False
 
         # Cancel background tasks
-        if self._chain_monitor_task:
-            self._chain_monitor_task.cancel()
-            try:
-                await self._chain_monitor_task
-            except asyncio.CancelledError as e:
-                logger.error(f"Chain monitor task cancelled: {e}")
+        tasks_to_cancel = [
+            (self._chain_monitor_task, "chain_monitor"),
+            (self._heartbeat_monitor_task, "heartbeat_monitor"),
+            (self._score_evaluation_task, "score_evaluation"),
+            (self._weight_broadcast_task, "weight_broadcast"),
+        ]
 
-        if self._heartbeat_monitor_task:
-            self._heartbeat_monitor_task.cancel()
-            try:
-                await self._heartbeat_monitor_task
-            except asyncio.CancelledError as e:
-                logger.error(f"Heartbeat monitor task cancelled: {e}")
+        for task, name in tasks_to_cancel:
+            if task:
+                logger.info(f"Cancelling {name} task")
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError as e:
+                    logger.error(f"{name} task cancelled: {e}")
 
         # Close WebSocket connections
         for ws in self.active_connections.values():
@@ -320,6 +368,285 @@ class BackendService:
             except Exception as e:
                 logger.error(f"Error in heartbeat monitor: {e}")
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+    def _is_miner_eligible(
+        self,
+        result: BackendEvaluationResult,
+        competition: Competition,
+    ) -> bool:
+        """Check if a miner meets eligibility criteria for a competition."""
+        if result.success_rate is None or result.avg_reward is None:
+            return False
+
+        if result.success_rate < competition.min_success_rate:
+            logger.debug(
+                f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
+                f"success_rate={result.success_rate:.3f} < min_threshold={competition.min_success_rate:.3f}"
+            )
+            return False
+
+        if result.avg_reward < competition.min_avg_reward:
+            logger.debug(
+                f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
+                f"avg_reward={result.avg_reward:.3f} < min_threshold={competition.min_avg_reward}"
+            )
+            return False
+
+        return True
+
+    def _determine_competition_winner(
+        self,
+        competition: Competition,
+        eligible_miners: List[tuple[str, float]],
+    ) -> tuple[Optional[str], Optional[float]]:
+        """Determine the winner of a competition based on eligible miners."""
+        if not eligible_miners:
+            if competition.current_leader_hotkey:
+                logger.info(
+                    f"Competition {competition.id}: Current leader {competition.current_leader_hotkey} "
+                    f"retains position (no eligible challengers)"
+                )
+                return (
+                    competition.current_leader_hotkey,
+                    competition.current_leader_reward,
+                )
+            logger.info(f"Competition {competition.id}: No eligible miners found")
+            return None, None
+
+        # Sort by reward to find best performer
+        eligible_miners.sort(key=lambda x: x[1], reverse=True)
+        best_miner, best_reward = eligible_miners[0]
+
+        # No current leader - best miner becomes first leader
+        if not competition.current_leader_hotkey:
+            logger.info(
+                f"Competition {competition.id}: First leader {best_miner} "
+                f"established with avg_reward={best_reward:.3f}"
+            )
+            return best_miner, best_reward
+
+        # Check if best miner is already the leader
+        if best_miner == competition.current_leader_hotkey:
+            logger.info(
+                f"Competition {competition.id}: Current leader {best_miner} "
+                f"retains position with avg_reward={best_reward:.3f}"
+            )
+            return competition.current_leader_hotkey, competition.current_leader_reward
+
+        # Challenger must exceed current leader by win margin
+        required_reward = (competition.current_leader_reward or 0) * (
+            1 + competition.win_margin_pct
+        )
+
+        if best_reward > required_reward:
+            logger.info(
+                f"Competition {competition.id}: New leader {best_miner} "
+                f"(avg_reward={best_reward:.3f}) defeats previous leader "
+                f"{competition.current_leader_hotkey} (required={required_reward:.3f})"
+            )
+            return best_miner, best_reward
+
+        # Current leader retains position
+        logger.info(
+            f"Competition {competition.id}: Current leader {competition.current_leader_hotkey} "
+            f"retains position. Challenger {best_miner} (avg_reward={best_reward:.3f}) "
+            f"didn't exceed required margin {required_reward:.3f}"
+        )
+        return competition.current_leader_hotkey, competition.current_leader_reward
+
+    async def _score_evaluations(self) -> dict[SS58Address, float]:
+        """
+        Score completed evaluations with winner-takes-all per competition.
+
+        Scoring logic:
+        - Miners must meet minimum success rate threshold per competition to be considered
+        - Miners must pass minimum avg reward threshold per competition
+        - New miners must exceed current leader by win margin percentage to become leader
+        - Current leader retains position if no challenger exceeds margin
+        - Each miner can only win ONE competition (first-win policy if appearing in multiple)
+        - Final scores are normalized based on competition points
+
+        Returns:
+            dict[SS58Address, float]: Mapping of miner hotkeys to their normalized scores (0-1).
+        """
+        # TODO: consider eval results from multiple (minimum 2) validators before applying scores?
+        async with self.async_session() as session:
+            # Fetch all active competitions
+            competitions_result = await session.execute(
+                select(Competition).where(Competition.active)
+            )
+            competitions = competitions_result.scalars().all()
+
+            if not competitions:
+                logger.info("No active competitions found for scoring")
+                return {}
+
+            # Calculate total points across all competitions
+            total_points = sum(comp.points for comp in competitions)
+
+            # Dictionary to store winner scores
+            miner_scores: dict[SS58Address, float] = {}
+
+            for competition in competitions:
+                # Get all evaluation results for this competition
+                results_query = select(BackendEvaluationResult).where(
+                    BackendEvaluationResult.competition_id == competition.id
+                )
+                results = await session.execute(results_query)
+                eval_results = results.scalars().all()
+
+                if not eval_results:
+                    logger.debug(
+                        f"No evaluation results for competition {competition.id}"
+                    )
+                    continue
+
+                # Find eligible challengers
+                eligible_miners: List[tuple[str, float]] = []
+                for result in eval_results:
+                    if self._is_miner_eligible(result, competition):
+                        eligible_miners.append((result.miner_hotkey, result.avg_reward))
+
+                # Determine competition winner
+                winner_hotkey, winner_reward = self._determine_competition_winner(
+                    competition, eligible_miners
+                )
+
+                if not winner_hotkey:
+                    continue
+
+                # Update competition leader if changed
+                if (
+                    winner_hotkey != competition.current_leader_hotkey
+                    or winner_reward != competition.current_leader_reward
+                ):
+                    competition.current_leader_hotkey = winner_hotkey
+                    competition.current_leader_reward = winner_reward
+                    competition.leader_updated_at = datetime.now(timezone.utc)
+
+                # Award points to winner (check for duplicate wins first)
+                normalized_score = competition.points / total_points
+
+                if winner_hotkey in miner_scores:
+                    logger.warning(
+                        f"Miner {winner_hotkey} already won competition - skipping score from {competition.id}. "
+                        f"Previous score: {miner_scores[winner_hotkey]:.4f}, would have added: {normalized_score:.4f}"
+                    )
+                    continue
+
+                miner_scores[winner_hotkey] = normalized_score
+                logger.info(
+                    f"Competition {competition.id}: Awarded {normalized_score:.4f} normalized score to {winner_hotkey}"
+                )
+
+            # Commit any leader updates to database
+            await session.commit()
+
+            # Log final scores
+            if miner_scores:
+                logger.info(f"Final miner scores: {len(miner_scores)} miners scored")
+                for hotkey, score in sorted(
+                    miner_scores.items(), key=lambda x: x[1], reverse=True
+                )[:10]:
+                    logger.info(f"  {hotkey}: {score:.4f}")
+            else:
+                logger.info("No miners received scores")
+
+            return miner_scores
+
+    async def _periodic_score_evaluation(self) -> None:
+        """Periodically evaluate and update miner scores."""
+        logger.info("Starting periodic score evaluation task")
+
+        while self._running:
+            try:
+                logger.info("Running score evaluation cycle")
+                miner_scores = await self._score_evaluations()
+
+                # Store latest scores for weight broadcasting
+                self._latest_miner_scores = miner_scores
+
+                logger.info(
+                    f"Score evaluation complete. {len(miner_scores)} miners scored."
+                )
+
+            except Exception as e:
+                logger.error(f"Error in periodic score evaluation: {e}")
+
+            # Wait for next evaluation cycle
+            await asyncio.sleep(self.score_evaluation_interval)
+
+    async def _periodic_weight_broadcast(self) -> None:
+        """Periodically broadcast weights to validators and set on chain."""
+        logger.info("Starting periodic weight broadcast task")
+
+        while self._running:
+            try:
+                logger.info("Running weight broadcast cycle")
+                await self._broadcast_and_set_weights()
+
+            except Exception as e:
+                logger.error(f"Error in periodic weight broadcast: {e}")
+
+            # Wait for next broadcast cycle
+            await asyncio.sleep(self.weight_broadcast_interval)
+
+    async def _broadcast_and_set_weights(self) -> None:
+        """Broadcast weights to connected validators and set on chain using latest scores."""
+        try:
+            if not self.substrate:
+                logger.error("Substrate not initialized")
+                return
+            if not self.metagraph:
+                logger.error("Metagraph not initialized")
+                return
+
+            # Use cached scores from periodic evaluation
+            miner_scores = self._latest_miner_scores.copy()
+            # get node uids from metagraph based on their hotkeys
+            nodes = self.metagraph.nodes if self.metagraph else {}
+
+            # Build weights dict mapping UIDs to weights
+            weights_dict: dict[int, float] = {}
+            for hotkey, weight in miner_scores.items():
+                node = nodes.get(hotkey)
+                if node:
+                    weights_dict[node.node_id] = weight
+
+            if not weights_dict:
+                logger.info("No miner scores to broadcast")
+                return
+
+            # Populate missing entries with 0.0 weight for all nodes
+            for node in nodes.values():
+                weights_dict.setdefault(node.node_id, 0.0)
+
+            # Broadcast to validators
+            weight_msg = SetWeightsMessage(weights=weights_dict)
+            weights_msg_str = weight_msg.model_dump_json()
+            broadcast_count = 0
+            failed_connections = []
+
+            for conn_id, ws in list(self.active_connections.items()):
+                try:
+                    await ws.send_text(weights_msg_str)
+                    broadcast_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to send to {conn_id}: {e}")
+                    failed_connections.append(conn_id)
+
+            # Clean up failed connections
+            for conn_id in failed_connections:
+                if conn_id in self.active_connections:
+                    del self.active_connections[conn_id]
+                if conn_id in self.validator_connections:
+                    del self.validator_connections[conn_id]
+
+            logger.info(
+                f"Broadcasted weight update to {broadcast_count} validators:\n{weights_msg_str}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to broadcast weights: {e}")
 
     async def _get_latest_block(self) -> int:
         """Get latest block from chain.

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
@@ -63,7 +64,12 @@ backend_service = BackendService(config)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage backend service lifecycle."""
+    # Initialize the service but don't start background tasks yet
     await backend_service.startup()
+
+    # Start background tasks after FastAPI is ready
+    asyncio.create_task(backend_service.start_background_tasks())
+
     yield
     await backend_service.shutdown()
 
@@ -187,9 +193,6 @@ async def create_competition(competition: CompetitionCreateRequest):
             id=uuid.uuid4().hex,
             name=competition.name,
             description=competition.description,
-            # TODO: consider changing the schema for this (if we need to)?
-            # we want users to be able to submit entire benchmarks
-            # json *specs*, not just a list of strings
             benchmarks=competition.benchmarks,
             points=competition.points,
             active=True,

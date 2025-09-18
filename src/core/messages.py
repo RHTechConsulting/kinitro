@@ -24,6 +24,7 @@ class MessageType(StrEnum):
     HEARTBEAT_ACK = "heartbeat_ack"
     REGISTRATION_ACK = "registration_ack"
     RESULT_ACK = "result_ack"
+    SET_WEIGHTS = "set_weights"
     EPISODE_DATA = "episode_data"
     EPISODE_STEP_DATA = "episode_step_data"
     ERROR = "error"
@@ -72,6 +73,17 @@ class EvalResultMessage(SQLModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SetWeightsMessage(SQLModel):
+    """Message for sending model weights from backend to validators.
+
+    weights maps miner UIDs to their corresponding weights.
+    """
+
+    message_type: MessageType = MessageType.SET_WEIGHTS
+    weights: dict[int, float]  # Maps miner UID to weight
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ValidatorRegisterMessage(SQLModel):
     """Message for validator registration with backend."""
 
@@ -84,7 +96,6 @@ class HeartbeatMessage(SQLModel):
     """Message for validator heartbeat."""
 
     message_type: MessageType = MessageType.HEARTBEAT
-    queue_size: Optional[int] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

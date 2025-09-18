@@ -272,7 +272,6 @@ class MultiViewImageObsWrapper(ObservationWrapper):
             camera_names_used.append("default")
 
         # Save images to disk if enabled
-        # TODO: we'd want to save images in an R2 bucket or something
         if self._save_images and self._image_save_dir:
             self._save_images_to_disk(images_hwc, camera_names_used)
 

@@ -39,7 +39,7 @@ uv run alembic upgrade head
 # --- Install pgq extension ---
 echo "Installing pgq extension…"
 # apply the output of pgq install --dry-run
-pgq install --dry-run | psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}"
+uv run pgq install --dry-run | psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}"
 
 echo "✅ Done."
 
