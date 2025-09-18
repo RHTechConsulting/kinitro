@@ -409,13 +409,13 @@ class WebSocketValidator(Neuron):
         """Handle weight setting message from backend.
 
         This function:
-        1. Receives weights and miner UIDs from the backend
+        1. Receives weights dict (UID->weight mapping) from the backend
         2. Syncs the metagraph to get latest chain state
         3. Sets the weights on chain using the validator's keypair
         """
         try:
             logger.info(
-                f"Received weight update: {len(weights_msg.weights)} weights for miners {weights_msg.miner_uids[:5]}..."
+                f"Received weight update: {len(weights_msg.weights)} weights for miners {list(weights_msg.weights.keys())[:5]}..."
             )
 
             if not self.substrate or not self.metagraph:
@@ -437,15 +437,17 @@ class WebSocketValidator(Neuron):
                     )
                     return
 
+            # Extract node_ids and weights as parallel lists for the set_node_weights function
+            node_ids = list(weights_msg.weights.keys())
+            node_weights = list(weights_msg.weights.values())
+
             # Set weights on chain
-            logger.info(
-                f"Setting weights on chain for {len(weights_msg.miner_uids)} miners"
-            )
+            logger.info(f"Setting weights on chain for {len(node_ids)} miners")
             success = set_node_weights(
                 substrate=self.substrate,
                 keypair=self.keypair,
-                node_ids=weights_msg.miner_uids,
-                node_weights=weights_msg.weights,
+                node_ids=node_ids,
+                node_weights=node_weights,
                 netuid=self.config.settings["subtensor"]["netuid"],
                 validator_node_id=self.validator_node_id,
                 version_key=0,
@@ -455,7 +457,7 @@ class WebSocketValidator(Neuron):
 
             if success:
                 logger.info(
-                    f"Successfully set weights on chain for {len(weights_msg.miner_uids)} miners"
+                    f"Successfully set weights on chain for {len(node_ids)} miners"
                 )
             else:
                 logger.error("Failed to set weights on chain")

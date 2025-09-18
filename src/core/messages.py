@@ -74,11 +74,13 @@ class EvalResultMessage(SQLModel):
 
 
 class SetWeightsMessage(SQLModel):
-    """Message for sending model weights from backend to validators."""
+    """Message for sending model weights from backend to validators.
+
+    weights maps miner UIDs to their corresponding weights.
+    """
 
     message_type: MessageType = MessageType.SET_WEIGHTS
-    weights: list[float]
-    miner_uids: list[int]
+    weights: dict[int, float]  # Maps miner UID to weight
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

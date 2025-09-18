@@ -516,12 +516,7 @@ class BackendService:
 
                 # Award points to current leader (normalized)
                 if winner_hotkey:
-                    # Only normalize if there are points to distribute
-                    if total_points > 0:
-                        normalized_score = competition.points / total_points
-                    else:
-                        normalized_score = 0.0
-
+                    normalized_score = competition.points / total_points
                     miner_scores[winner_hotkey] = (
                         miner_scores.get(winner_hotkey, 0.0) + normalized_score
                     )
@@ -596,21 +591,23 @@ class BackendService:
             # get node uids from metagraph based on their hotkeys
             nodes = self.metagraph.nodes if self.metagraph else {}
 
-            miner_uids: List[int] = []
-            weights: List[float] = []
-
+            # Build weights dict mapping UIDs to weights
+            weights_dict: dict[int, float] = {}
             for hotkey, weight in miner_scores.items():
                 node = nodes.get(hotkey)
                 if node:
-                    miner_uids.append(node.node_id)
-                    weights.append(weight)
+                    weights_dict[node.node_id] = weight
 
-            if not miner_scores:
+            if not weights_dict:
                 logger.info("No miner scores to broadcast")
                 return
 
+            # Populate missing entries with 0.0 weight for all nodes
+            for node in nodes.values():
+                weights_dict.setdefault(node.node_id, 0.0)
+
             # Broadcast to validators
-            weight_msg = SetWeightsMessage(weights=weights, miner_uids=miner_uids)
+            weight_msg = SetWeightsMessage(weights=weights_dict)
             weights_msg_str = weight_msg.model_dump_json()
             broadcast_count = 0
             failed_connections = []
