@@ -7,10 +7,13 @@ via WebSocket and receives evaluation jobs from there
 
 import asyncio
 import json
-from typing import Optional
+from typing import Any, Optional
 
 import asyncpg
 import websockets
+from fiber.chain.interface import get_substrate
+from fiber.chain.metagraph import Metagraph
+from fiber.chain.weights import set_node_weights
 from pgqueuer import Job, PgQueuer, Queries
 from pgqueuer.db import AsyncpgDriver
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -23,6 +26,7 @@ from core.messages import (
     EvalResultMessage,
     HeartbeatMessage,
     MessageType,
+    SetWeightsMessage,
     ValidatorRegisterMessage,
 )
 from core.neuron import Neuron
@@ -65,12 +69,20 @@ class WebSocketValidator(Neuron):
 
         self.q: Optional[Queries] = None
 
+        # Chain connection objects
+        self.substrate: Optional[Any] = None  # SubstrateInterface from fiber
+        self.metagraph: Optional[Metagraph] = None
+        self.validator_node_id: Optional[int] = None  # Our node ID on the chain
+
         logger.info(f"WebSocket Validator initialized for hotkey: {self.hotkey}")
 
     async def start(self):
         """Start the validator service."""
         logger.info("Starting WebSocket Validator")
         self._running = True
+
+        # Initialize chain connection
+        await self._init_chain()
 
         # Start the result processor task
         self._result_processor_task = asyncio.create_task(self._process_results())
@@ -173,10 +185,7 @@ class WebSocketValidator(Neuron):
         """Send periodic heartbeats to backend."""
         try:
             while self.connected and not self._heartbeat_task.cancelled():
-                # Send heartbeat with queue size
-                # queue_size = len(self.active_jobs)
-                # TODO: 6969 is a placeholder
-                heartbeat = HeartbeatMessage(queue_size=6969)
+                heartbeat = HeartbeatMessage()
                 await self._send_message(heartbeat.model_dump())
 
                 # Wait for heartbeat interval
@@ -195,9 +204,10 @@ class WebSocketValidator(Neuron):
                     data = json.loads(message)
                     message_type = data.get("message_type")
 
-                    # TODO: create handler for receiving and setting weights
                     if message_type == MessageType.EVAL_JOB:
                         await self._handle_eval_job(EvalJobMessage(**data))
+                    elif message_type == MessageType.SET_WEIGHTS:
+                        await self._handle_set_weights(SetWeightsMessage(**data))
                     elif message_type == MessageType.HEARTBEAT_ACK:
                         logger.debug("Received heartbeat ack")
                     elif message_type == MessageType.ERROR:
@@ -215,7 +225,6 @@ class WebSocketValidator(Neuron):
         except Exception as e:
             logger.error(f"Message loop error: {e}")
 
-    # TODO: implement proper eval job handling
     async def _handle_eval_job(self, job: EvalJobMessage):
         """Handle evaluation job from backend."""
         logger.info(
@@ -361,6 +370,97 @@ class WebSocketValidator(Neuron):
     async def _send_episode_step_data(self, step_data: EpisodeStepDataMessage):
         """Send episode step data to the backend."""
         await self._send_message(step_data.model_dump())
+
+    async def _init_chain(self) -> None:
+        """Initialize blockchain connection."""
+        try:
+            logger.info("Initializing blockchain connection...")
+
+            self.substrate = get_substrate(
+                subtensor_network=self.config.settings["subtensor"]["network"],
+                subtensor_address=self.config.settings["subtensor"]["address"],
+            )
+
+            self.metagraph = Metagraph(
+                netuid=self.config.settings["subtensor"]["netuid"],
+                substrate=self.substrate,
+            )
+
+            # Sync metagraph to get our validator node_id
+            self.metagraph.sync_nodes()
+
+            # Get our validator node_id from the metagraph
+            validator_node = self.metagraph.nodes.get(self.hotkey)
+            if validator_node:
+                self.validator_node_id = validator_node.node_id
+                logger.info(f"Validator node_id: {self.validator_node_id}")
+            else:
+                logger.warning(f"Validator hotkey {self.hotkey} not found in metagraph")
+                self.validator_node_id = None
+
+            logger.info("Blockchain connection initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize blockchain connection: {e}")
+            # Continue without chain connection - validator can still process jobs
+            logger.warning("Continuing without blockchain connection")
+
+    async def _handle_set_weights(self, weights_msg: SetWeightsMessage):
+        """Handle weight setting message from backend.
+
+        This function:
+        1. Receives weights and miner UIDs from the backend
+        2. Syncs the metagraph to get latest chain state
+        3. Sets the weights on chain using the validator's keypair
+        """
+        try:
+            logger.info(
+                f"Received weight update: {len(weights_msg.weights)} weights for miners {weights_msg.miner_uids[:5]}..."
+            )
+
+            if not self.substrate or not self.metagraph:
+                logger.error("Chain connection not initialized, cannot set weights")
+                return
+
+            # Sync metagraph to get latest state
+            logger.info("Syncing metagraph before setting weights...")
+            self.metagraph.sync_nodes()
+
+            # Get validator node_id if not already set
+            if self.validator_node_id is None:
+                validator_node = self.metagraph.nodes.get(self.hotkey)
+                if validator_node:
+                    self.validator_node_id = validator_node.node_id
+                else:
+                    logger.error(
+                        f"Validator hotkey {self.hotkey} not found in metagraph, cannot set weights"
+                    )
+                    return
+
+            # Set weights on chain
+            logger.info(
+                f"Setting weights on chain for {len(weights_msg.miner_uids)} miners"
+            )
+            success = set_node_weights(
+                substrate=self.substrate,
+                keypair=self.keypair,
+                node_ids=weights_msg.miner_uids,
+                node_weights=weights_msg.weights,
+                netuid=self.config.settings["subtensor"]["netuid"],
+                validator_node_id=self.validator_node_id,
+                version_key=0,
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+
+            if success:
+                logger.info(
+                    f"Successfully set weights on chain for {len(weights_msg.miner_uids)} miners"
+                )
+            else:
+                logger.error("Failed to set weights on chain")
+
+        except Exception as e:
+            logger.error(f"Error handling set weights message: {e}")
 
     async def _send_message(self, message: dict):
         """Send message to backend."""
