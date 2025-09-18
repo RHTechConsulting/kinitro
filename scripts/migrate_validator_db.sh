@@ -40,7 +40,7 @@ uv run alembic upgrade head
 echo "Checking pgq extension…"
 if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tc "SELECT 1 FROM pg_extension WHERE extname='pgq'" | grep -q 1; then
     echo "Installing pgq extension…"
-    pgq install --dry-run | psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}"
+    uv run pgq install --dry-run | psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}"
 else
     echo "pgq extension already installed."
 fi
