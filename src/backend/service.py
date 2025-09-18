@@ -517,9 +517,16 @@ class BackendService:
                 # Award points to current leader (normalized)
                 if winner_hotkey:
                     normalized_score = competition.points / total_points
-                    miner_scores[winner_hotkey] = (
-                        miner_scores.get(winner_hotkey, 0.0) + normalized_score
-                    )
+
+                    # Check if miner already has a score from another competition
+                    if winner_hotkey in miner_scores:
+                        logger.warning(
+                            f"Miner {winner_hotkey} already won competition - skipping score from {competition.id}. "
+                            f"Previous score: {miner_scores[winner_hotkey]:.4f}, would have added: {normalized_score:.4f}"
+                        )
+                        continue
+
+                    miner_scores[winner_hotkey] = normalized_score
                     logger.info(
                         f"Competition {competition.id}: Awarded {normalized_score:.4f} normalized score to {winner_hotkey}"
                     )
