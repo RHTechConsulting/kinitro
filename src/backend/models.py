@@ -24,7 +24,11 @@ from sqlalchemy import (
 from sqlalchemy.sql import func
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
-from backend.constants import DEFAULT_MIN_AVG_REWARD, DEFAULT_WIN_MARGIN_PCT
+from backend.constants import (
+    DEFAULT_MIN_AVG_REWARD,
+    DEFAULT_MIN_SUCCESS_RATE,
+    DEFAULT_WIN_MARGIN_PCT,
+)
 from core.db.models import EvaluationStatus, SnowflakeId, TimestampMixin
 
 # Type aliases for consistency
@@ -42,6 +46,7 @@ class CompetitionCreateRequest(SQLModel):
     points: int = Field(gt=0)
     min_avg_reward: float = Field(default=DEFAULT_MIN_AVG_REWARD)
     win_margin_pct: float = Field(default=DEFAULT_WIN_MARGIN_PCT)
+    min_success_rate: float = Field(default=DEFAULT_MIN_SUCCESS_RATE)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 
@@ -56,6 +61,7 @@ class CompetitionResponse(SQLModel):
     points: int
     min_avg_reward: float
     win_margin_pct: float
+    min_success_rate: float
     current_leader_hotkey: Optional[str]
     current_leader_reward: Optional[float]
     leader_updated_at: Optional[datetime]
@@ -197,6 +203,11 @@ class Competition(TimestampMixin, SQLModel, table=True):
         default=DEFAULT_WIN_MARGIN_PCT,
         nullable=False,
         sa_column_kwargs={"server_default": str(DEFAULT_WIN_MARGIN_PCT)},
+    )
+    min_success_rate: float = Field(
+        default=DEFAULT_MIN_SUCCESS_RATE,
+        nullable=False,
+        sa_column_kwargs={"server_default": str(DEFAULT_MIN_SUCCESS_RATE)},
     )
 
     # Current leader tracking

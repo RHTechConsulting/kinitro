@@ -16,6 +16,7 @@ BACKEND_PORT = 8080
 # Competition scoring thresholds
 DEFAULT_MIN_AVG_REWARD = 0.0
 DEFAULT_WIN_MARGIN_PCT = 0.05  # 5% margin required to win
+DEFAULT_MIN_SUCCESS_RATE = 1.0  # Min. success rate to be considered a leader
 
 # Scoring and weight setting intervals (in seconds)
 SCORE_EVALUATION_INTERVAL = 300  # 5 minutes

@@ -61,7 +61,6 @@ from .models import (
 
 logger = get_logger(__name__)
 
-# TODO: implement weight broadcasting and weight setting to connecting validators
 ConnectionId = str  # Unique ID for each WebSocket connection
 
 
@@ -375,7 +374,7 @@ class BackendService:
         Score completed evaluations with winner-takes-all per competition.
 
         Scoring logic:
-        - Miners must have 1.0 success rate to be considered
+        - Miners must meet minimum success rate threshold per competition to be considered
         - Miners must pass minimum avg reward threshold per competition
         - New miners must exceed current leader by win margin percentage to become leader
         - Current leader retains position if no challenger exceeds margin
@@ -384,6 +383,7 @@ class BackendService:
         Returns:
             dict[SS58Address, float]: Mapping of miner hotkeys to their normalized scores (0-1).
         """
+        # TODO: consider eval results from multiple (minimum 2) validators before applying scores?
         async with self.async_session() as session:
             # Fetch all active competitions
             competitions_result = await session.execute(
@@ -426,10 +426,10 @@ class BackendService:
                         continue
 
                     # Check eligibility criteria
-                    if result.success_rate != 1.0:
+                    if result.success_rate < competition.min_success_rate:
                         logger.debug(
                             f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
-                            f"success_rate={result.success_rate:.3f} != 1.0"
+                            f"success_rate={result.success_rate:.3f} < min_threshold={competition.min_success_rate:.3f}"
                         )
                         continue
 
