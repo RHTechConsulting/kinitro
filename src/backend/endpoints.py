@@ -193,9 +193,6 @@ async def create_competition(competition: CompetitionCreateRequest):
             id=uuid.uuid4().hex,
             name=competition.name,
             description=competition.description,
-            # TODO: consider changing the schema for this (if we need to)?
-            # we want users to be able to submit entire benchmarks
-            # json *specs*, not just a list of strings
             benchmarks=competition.benchmarks,
             points=competition.points,
             active=True,

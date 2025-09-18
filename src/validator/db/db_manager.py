@@ -178,6 +178,3 @@ class DatabaseManager:
         eval_result_bytes = eval_result.model_dump_json().encode("utf-8")
         await q.enqueue(["eval_result"], [eval_result_bytes], [0])
         await conn.close()
-
-
-# TODO: add episode logging functions?

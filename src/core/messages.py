@@ -94,7 +94,6 @@ class HeartbeatMessage(SQLModel):
     """Message for validator heartbeat."""
 
     message_type: MessageType = MessageType.HEARTBEAT
-    queue_size: Optional[int] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
