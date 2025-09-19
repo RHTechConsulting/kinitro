@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import (
+    Depends,
     FastAPI,
     HTTPException,
     Query,
@@ -17,6 +18,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from backend.auth import (
+    UserRole,
+    create_auth_dependency,
+    create_role_dependencies,
+    generate_api_key,
+    hash_api_key,
+)
 from backend.constants import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -35,6 +43,10 @@ from core.messages import (
 
 from .config import BackendConfig
 from .models import (
+    ApiKey,
+    ApiKeyCreateRequest,
+    ApiKeyCreateResponse,
+    ApiKeyResponse,
     BackendEvaluationJob,
     BackendEvaluationJobStatus,
     BackendEvaluationResult,
@@ -59,6 +71,12 @@ logger = get_logger(__name__)
 # Create backend service instance
 config = BackendConfig()
 backend_service = BackendService(config)
+
+# Set up authentication dependencies
+get_current_user = create_auth_dependency(backend_service)
+require_admin, require_validator, require_auth = create_role_dependencies(
+    get_current_user
+)
 
 
 @asynccontextmanager
@@ -181,7 +199,9 @@ async def get_stats() -> BackendStatsResponse:
 
 # Competition endpoints
 @app.post("/competitions", response_model=CompetitionResponse)
-async def create_competition(competition: CompetitionCreateRequest):
+async def create_competition(
+    competition: CompetitionCreateRequest, admin_user: "ApiKey" = Depends(require_admin)
+):
     """Create a new competition."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -254,7 +274,9 @@ async def get_competition(competition_id: str):
 
 
 @app.patch("/competitions/{competition_id}/activate")
-async def activate_competition(competition_id: str):
+async def activate_competition(
+    competition_id: str, admin_user: "ApiKey" = Depends(require_admin)
+):
     """Activate a competition."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -279,7 +301,9 @@ async def activate_competition(competition_id: str):
 
 
 @app.patch("/competitions/{competition_id}/deactivate")
-async def deactivate_competition(competition_id: str):
+async def deactivate_competition(
+    competition_id: str, admin_user: "ApiKey" = Depends(require_admin)
+):
     """Deactivate a competition."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -304,7 +328,9 @@ async def deactivate_competition(competition_id: str):
 
 
 @app.delete("/competitions/{competition_id}")
-async def delete_competition(competition_id: str):
+async def delete_competition(
+    competition_id: str, admin_user: "ApiKey" = Depends(require_admin)
+):
     """Delete a competition (soft delete by deactivating)."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -810,6 +836,192 @@ async def get_steps(
         steps = result.scalars().all()
 
         return [EpisodeStepDataResponse.model_validate(step) for step in steps]
+
+
+# ============================================================================
+# API Key Management Endpoints
+# ============================================================================
+
+
+@app.post("/admin/api-keys", response_model=ApiKeyCreateResponse)
+async def create_api_key(
+    key_request: ApiKeyCreateRequest, admin_user: ApiKey = Depends(require_admin)
+):
+    """Create a new API key (admin only)."""
+    # Validate role
+    try:
+        UserRole(key_request.role)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role: {key_request.role}. Must be one of: admin, validator, viewer",
+        )
+
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    # Generate API key
+    api_key = generate_api_key()
+    key_hash = hash_api_key(api_key)
+
+    async with backend_service.async_session() as session:
+        # Create API key record
+        db_api_key = ApiKey(
+            name=key_request.name,
+            description=key_request.description,
+            key_hash=key_hash,
+            role=key_request.role,
+            associated_hotkey=key_request.associated_hotkey,
+            expires_at=key_request.expires_at,
+        )
+
+        session.add(db_api_key)
+        await session.commit()
+        await session.refresh(db_api_key)
+
+        # Return response with the actual API key (only shown once)
+        return ApiKeyCreateResponse(
+            id=db_api_key.id,
+            name=db_api_key.name,
+            description=db_api_key.description,
+            role=db_api_key.role,
+            associated_hotkey=db_api_key.associated_hotkey,
+            is_active=db_api_key.is_active,
+            expires_at=db_api_key.expires_at,
+            created_at=db_api_key.created_at,
+            api_key=api_key,
+        )
+
+
+@app.get("/admin/api-keys", response_model=List[ApiKeyResponse])
+async def list_api_keys(
+    admin_user: ApiKey = Depends(require_admin),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
+):
+    """List all API keys (admin only)."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        query = (
+            select(ApiKey).offset(skip).limit(limit).order_by(ApiKey.created_at.desc())
+        )
+        result = await session.execute(query)
+        api_keys = result.scalars().all()
+
+        return [ApiKeyResponse.model_validate(key) for key in api_keys]
+
+
+@app.get("/admin/api-keys/{key_id}", response_model=ApiKeyResponse)
+async def get_api_key(
+    key_id: int,
+    admin_user: ApiKey = Depends(require_admin),
+):
+    """Get a specific API key by ID (admin only)."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(select(ApiKey).where(ApiKey.id == key_id))
+        api_key = result.scalar_one_or_none()
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="API key not found"
+            )
+
+        return ApiKeyResponse.model_validate(api_key)
+
+
+@app.patch("/admin/api-keys/{key_id}/activate")
+async def activate_api_key(
+    key_id: int,
+    admin_user: ApiKey = Depends(require_admin),
+):
+    """Activate an API key (admin only)."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(select(ApiKey).where(ApiKey.id == key_id))
+        api_key = result.scalar_one_or_none()
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="API key not found"
+            )
+
+        api_key.is_active = True
+        await session.commit()
+
+        return {"status": "activated", "key_id": key_id}
+
+
+@app.patch("/admin/api-keys/{key_id}/deactivate")
+async def deactivate_api_key(
+    key_id: int,
+    admin_user: ApiKey = Depends(require_admin),
+):
+    """Deactivate an API key (admin only)."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(select(ApiKey).where(ApiKey.id == key_id))
+        api_key = result.scalar_one_or_none()
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="API key not found"
+            )
+
+        api_key.is_active = False
+        await session.commit()
+
+        return {"status": "deactivated", "key_id": key_id}
+
+
+@app.delete("/admin/api-keys/{key_id}")
+async def delete_api_key(
+    key_id: int,
+    admin_user: ApiKey = Depends(require_admin),
+):
+    """Delete an API key (admin only)."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(select(ApiKey).where(ApiKey.id == key_id))
+        api_key = result.scalar_one_or_none()
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="API key not found"
+            )
+
+        await session.delete(api_key)
+        await session.commit()
+
+        return {"status": "deleted", "key_id": key_id}
 
 
 # ============================================================================
