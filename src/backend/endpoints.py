@@ -870,6 +870,7 @@ async def create_api_key(
     async with backend_service.async_session() as session:
         # Create API key record
         db_api_key = ApiKey(
+            id=next(backend_service.id_generator),
             name=key_request.name,
             description=key_request.description,
             key_hash=key_hash,

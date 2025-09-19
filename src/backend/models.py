@@ -188,7 +188,7 @@ class ApiKeyCreateRequest(SQLModel):
 class ApiKeyResponse(SQLModel):
     """Response model for API key data (without the actual key)."""
 
-    id: int
+    id: SnowflakeId
     name: str
     description: Optional[str]
     role: str
@@ -206,7 +206,7 @@ class ApiKeyResponse(SQLModel):
 class ApiKeyCreateResponse(SQLModel):
     """Response model for API key creation (includes the actual key)."""
 
-    id: int
+    id: SnowflakeId
     name: str
     description: Optional[str]
     role: str

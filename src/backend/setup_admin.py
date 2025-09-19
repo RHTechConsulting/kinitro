@@ -9,6 +9,7 @@ the first admin API key that can be used to manage other API keys.
 import asyncio
 import sys
 
+from snowflake import SnowflakeGenerator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -48,12 +49,16 @@ async def create_initial_admin_key():
                 print("Use the admin endpoints to create additional API keys.")
                 return True
 
+            # Initialize snowflake ID generator
+            id_generator = SnowflakeGenerator(42)
+
             # Generate new admin API key
             api_key = generate_api_key()
             key_hash = hash_api_key(api_key)
 
             # Create admin API key record
             admin_api_key = ApiKey(
+                id=next(id_generator),
                 name="Initial Admin",
                 description="Initial admin API key created during setup",
                 key_hash=key_hash,
