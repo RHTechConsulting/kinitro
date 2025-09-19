@@ -175,6 +175,51 @@ class BackendStatsResponse(SQLModel):
     competition_percentages: Dict[str, float]
 
 
+class ApiKeyCreateRequest(SQLModel):
+    """Request model for creating an API key."""
+
+    name: str
+    description: Optional[str] = None
+    role: str  # admin, validator, viewer
+    associated_hotkey: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
+class ApiKeyResponse(SQLModel):
+    """Response model for API key data (without the actual key)."""
+
+    id: SnowflakeId
+    name: str
+    description: Optional[str]
+    role: str
+    associated_hotkey: Optional[str]
+    is_active: bool
+    last_used_at: Optional[datetime]
+    expires_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ApiKeyCreateResponse(SQLModel):
+    """Response model for API key creation (includes the actual key)."""
+
+    id: SnowflakeId
+    name: str
+    description: Optional[str]
+    role: str
+    associated_hotkey: Optional[str]
+    is_active: bool
+    expires_at: Optional[datetime]
+    created_at: datetime
+    api_key: str  # The actual key - only shown once
+
+    class Config:
+        from_attributes = True
+
+
 # Models for DB tables
 class Competition(TimestampMixin, SQLModel, table=True):
     """Competition with benchmarks and point allocation."""
@@ -653,4 +698,55 @@ class BackendState(TimestampMixin, SQLModel, table=True):
         CheckConstraint(
             "id = 1", name="ck_backend_state_singleton"
         ),  # Ensure only one row
+    )
+
+
+class ApiKey(TimestampMixin, SQLModel, table=True):
+    """API keys for authentication and authorization."""
+
+    __tablename__ = "api_keys"
+
+    id: int = Field(sa_column=Column(BigInteger, primary_key=True))
+
+    # User identification
+    name: str = Field(max_length=128, nullable=False)
+    description: Optional[str] = Field(
+        default=None, sa_column=Column(SAText, nullable=True)
+    )
+
+    # The hashed API key (SHA256)
+    key_hash: str = Field(max_length=64, nullable=False, unique=True, index=True)
+
+    # Role for authorization
+    role: str = Field(max_length=32, nullable=False, index=True)
+
+    # Optional association with a specific hotkey (for validators)
+    associated_hotkey: Optional[SS58Address] = Field(
+        default=None, max_length=48, nullable=True, index=True
+    )
+
+    # Status
+    is_active: bool = Field(
+        default=True,
+        nullable=False,
+        index=True,
+        sa_column_kwargs={"server_default": "true"},
+    )
+
+    # Usage tracking
+    last_used_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
+    )
+
+    # Expiration (optional)
+    expires_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
+    )
+
+    __table_args__ = (
+        Index("ix_api_keys_active", "is_active"),
+        Index("ix_api_keys_expires", "expires_at"),
+        CheckConstraint(
+            "role IN ('admin', 'validator', 'viewer')", name="ck_api_keys_valid_role"
+        ),
     )
