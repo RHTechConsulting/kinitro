@@ -43,8 +43,8 @@ curl -X POST "$BACKEND_URL/competitions" \
 
 # Check the exit status
 if [ $? -eq 0 ]; then
-    echo -e "\n✅ Competition created successfully!"
+    echo "Competition created successfully!"
 else
-    echo -e "\n❌ Failed to create competition"
+    echo "Failed to create competition"
     exit 1
 fi

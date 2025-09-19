@@ -721,7 +721,7 @@ class ApiKey(TimestampMixin, SQLModel, table=True):
     role: str = Field(max_length=32, nullable=False, index=True)
 
     # Optional association with a specific hotkey (for validators)
-    associated_hotkey: Optional[str] = Field(
+    associated_hotkey: Optional[SS58Address] = Field(
         default=None, max_length=48, nullable=True, index=True
     )
 
