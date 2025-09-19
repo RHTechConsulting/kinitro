@@ -11,8 +11,8 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models import ApiKey
 from core.log import get_logger
 
 logger = get_logger(__name__)
@@ -48,15 +48,12 @@ async def get_api_key_from_db(
     if not backend_service.async_session:
         return None
 
-    # Import here to avoid circular imports
-    from backend.models import ApiKey
-
     # Hash the provided key and look it up
     key_hash = hash_api_key(api_key)
 
     async with backend_service.async_session() as session:
         result = await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active == True)
+            select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active)
         )
         api_key_obj = result.scalar_one_or_none()
 

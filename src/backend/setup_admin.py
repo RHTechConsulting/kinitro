@@ -8,12 +8,11 @@ the first admin API key that can be used to manage other API keys.
 
 import asyncio
 import sys
-from datetime import datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from backend.auth import generate_api_key, hash_api_key, UserRole
+from backend.auth import UserRole, generate_api_key, hash_api_key
 from backend.config import BackendConfig
 from backend.models import ApiKey
 
