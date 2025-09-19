@@ -34,7 +34,7 @@ jobs:
       - name: Copy files
         shell: bash
         run: |
-          rm -rf "${{ env.STAGING_DIR }}/docs/*"
+          rm -rf "${{ env.STAGING_DIR }}/docs"
           cp -rf docs "${{ env.STAGING_DIR }}/docs"
 
       - name: Commit and push changes
