@@ -38,11 +38,13 @@ from backend.constants import (
     WEIGHT_BROADCAST_INTERVAL,
     WEIGHT_BROADCAST_STARTUP_DELAY,
 )
+from backend.realtime import event_broadcaster
 from core.chain import query_commitments_from_substrate
 from core.db.models import EvaluationStatus
 from core.log import get_logger
 from core.messages import (
     EvalJobMessage,
+    EventType,
     SetWeightsMessage,
 )
 from core.schemas import ChainCommitmentResponse
@@ -805,6 +807,17 @@ class BackendService:
 
                 logger.debug(f"Created evaluation job: {eval_job}")
 
+                # Broadcast job created event to clients
+                # Convert the model to dict for JSON serialization
+                job_data = eval_job.model_dump()
+                # Convert datetime to ISO format string
+                if "created_at" in job_data and job_data["created_at"]:
+                    job_data["created_at"] = job_data["created_at"].isoformat()
+                if "updated_at" in job_data and job_data["updated_at"]:
+                    job_data["updated_at"] = job_data["updated_at"].isoformat()
+
+                await event_broadcaster.broadcast_event(EventType.JOB_CREATED, job_data)
+
                 # Broadcast to validators
                 await self._broadcast_job(eval_job)
                 logger.debug(f"Broadcasted job {job_id} to validators")
@@ -838,6 +851,24 @@ class BackendService:
                 )
                 session.add(status_record)
                 await session.commit()
+
+                # Broadcast status change event to clients using the model
+                status_data = status_record.model_dump()
+                # Convert datetime to ISO format string
+                if "created_at" in status_data and status_data["created_at"]:
+                    status_data["created_at"] = status_data["created_at"].isoformat()
+                if "updated_at" in status_data and status_data["updated_at"]:
+                    status_data["updated_at"] = status_data["updated_at"].isoformat()
+
+                await event_broadcaster.broadcast_event(
+                    EventType.JOB_STATUS_CHANGED, status_data
+                )
+
+                # If job is completed, also send JOB_COMPLETED event
+                if status == EvaluationStatus.COMPLETED:
+                    await event_broadcaster.broadcast_event(
+                        EventType.JOB_COMPLETED, status_data
+                    )
 
                 logger.debug(
                     f"Updated job {job_id} status to {status.value} for validator {validator_hotkey}"
