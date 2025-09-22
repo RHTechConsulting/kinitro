@@ -1408,6 +1408,20 @@ async def validator_websocket(websocket: WebSocket):
                         session.add(step_record)
                         await session.commit()
 
+                        # Broadcast episode step event to clients
+                        step_data = step_record.model_dump()
+                        # Convert datetime to ISO format string
+                        for field in ["created_at", "updated_at", "timestamp"]:
+                            if field in step_data and step_data[field]:
+                                step_data[field] = step_data[field].isoformat()
+                        # Add validator hotkey and job_id for context
+                        step_data["validator_hotkey"] = validator_hotkey
+                        step_data["job_id"] = episode_record.job_id
+
+                        await event_broadcaster.broadcast_event(
+                            EventType.EPISODE_STEP, step_data
+                        )
+
                         logger.info(
                             f"Stored step data from {validator_hotkey} for episode {step_msg.episode_id}, step {step_msg.step}"
                         )
