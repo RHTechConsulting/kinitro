@@ -170,6 +170,7 @@ class Orchestrator:
 
         return {
             "job_id": eval_job_msg.job_id,
+            "submission_id": eval_job_msg.submission_id,
             "eval_job_msg": eval_job_msg,
             "worker": worker,
             "cluster": cluster,
@@ -180,6 +181,7 @@ class Orchestrator:
     async def monitor_job(self, job_context: Dict):
         """Monitor a running job and handle completion."""
         job_id = job_context["job_id"]
+        submission_id = job_context["submission_id"]
         eval_job_msg = job_context["eval_job_msg"]
         evaluation_future = job_context["evaluation_future"]
 
@@ -242,6 +244,18 @@ class Orchestrator:
                 )
                 await self.db.queue_evaluation_result_msg(eval_result_msg)
 
+                # Clean up container resources
+                try:
+                    containers = Containers()
+                    containers.cleanup_container(submission_id)
+                    logger.info(
+                        f"Cleaned up container resources for submission {submission_id}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to clean up container for submission {submission_id}: {e}"
+                    )
+
                 return True  # Job completed
 
             # Check for timeout
@@ -254,6 +268,19 @@ class Orchestrator:
                 self.db.update_evaluation_job(
                     job_id, {"status": EvaluationStatus.FAILED}
                 )
+
+                # Clean up container resources on timeout
+                try:
+                    containers = Containers()
+                    containers.cleanup_container(submission_id)
+                    logger.info(
+                        f"Cleaned up container resources for timed out submission {submission_id}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to clean up container for timed out submission {submission_id}: {e}"
+                    )
+
                 return True  # Job timed out
 
             return False  # Job still running
@@ -261,6 +288,19 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Error monitoring job {job_id}: {e}")
             self.db.update_evaluation_job(job_id, {"status": EvaluationStatus.FAILED})
+
+            # Clean up container resources on error
+            try:
+                containers = Containers()
+                containers.cleanup_container(submission_id)
+                logger.info(
+                    f"Cleaned up container resources for failed submission {submission_id}"
+                )
+            except Exception as ex:
+                logger.error(
+                    f"Failed to clean up container for failed submission {submission_id}: {ex}"
+                )
+
             return True  # Job failed
 
     async def process_job(self, job: Job):
