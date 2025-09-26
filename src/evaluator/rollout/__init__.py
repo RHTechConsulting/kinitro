@@ -144,14 +144,16 @@ class RolloutWorker:
             except Exception as e:
                 logger.warning(f"Failed to cleanup env_manager: {e}")
 
-        # Clear episode loggers
+        # Clean up episode loggers and their database connections
         if hasattr(self, "episode_loggers"):
             for logger_instance in self.episode_loggers.values():
                 try:
-                    if hasattr(logger_instance, "close"):
+                    if hasattr(logger_instance, "cleanup"):
+                        logger_instance.cleanup()
+                    elif hasattr(logger_instance, "close"):
                         logger_instance.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup episode logger: {e}")
             self.episode_loggers.clear()
 
         # Clear any large data structures
@@ -228,6 +230,15 @@ class RolloutWorker:
 
             self.eval_end = time.time()
             self._log_evaluation_summary(task_results)
+
+            # Clean up episode loggers before general cleanup
+            for logger_instance in self.episode_loggers.values():
+                try:
+                    if hasattr(logger_instance, "cleanup"):
+                        logger_instance.cleanup()
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup episode logger: {e}")
+            self.episode_loggers.clear()
 
             # Clean up after evaluation
             self.cleanup()
@@ -314,6 +325,10 @@ class RolloutWorker:
 
         # Clean up episode logger after use
         if env_key in self.episode_loggers:
+            try:
+                self.episode_loggers[env_key].cleanup()
+            except Exception as e:
+                logger.warning(f"Failed to cleanup episode logger for {env_key}: {e}")
             del self.episode_loggers[env_key]
 
         return EnvResult.from_episodes(env_spec, episodes)
