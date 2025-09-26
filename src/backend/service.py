@@ -32,6 +32,7 @@ from backend.constants import (
     CHAIN_SCAN_YIELD_INTERVAL,
     DEFAULT_CHAIN_SYNC_INTERVAL,
     DEFAULT_MAX_COMMITMENT_LOOKBACK,
+    EVAL_JOB_TIMEOUT,
     HEARTBEAT_INTERVAL,
     MAX_WORKERS,
     SCORE_EVALUATION_INTERVAL,
@@ -105,6 +106,7 @@ class BackendService:
         self._running = False
         self._chain_monitor_task = None
         self._heartbeat_monitor_task = None
+        self._stale_job_monitor_task = None
         self._score_evaluation_task = None
         self._weight_broadcast_task = None
 
@@ -146,6 +148,7 @@ class BackendService:
         self._heartbeat_monitor_task = asyncio.create_task(
             self._monitor_validator_heartbeats()
         )
+        self._stale_job_monitor_task = asyncio.create_task(self._monitor_stale_jobs())
 
         # Delay before starting scoring
         logger.info(
@@ -181,6 +184,7 @@ class BackendService:
         tasks_to_cancel = [
             (self._chain_monitor_task, "chain_monitor"),
             (self._heartbeat_monitor_task, "heartbeat_monitor"),
+            (self._stale_job_monitor_task, "stale_job_monitor"),
             (self._score_evaluation_task, "score_evaluation"),
             (self._weight_broadcast_task, "weight_broadcast"),
         ]
@@ -327,6 +331,79 @@ class BackendService:
             except Exception as e:
                 logger.error(f"Error monitoring chain: {e}")
                 await asyncio.sleep(self.chain_sync_interval)
+
+    async def _monitor_stale_jobs(self) -> None:
+        """Monitor for stale jobs and mark them as failed."""
+        while self._running:
+            try:
+                if self.async_session:
+                    async with self.async_session() as session:
+                        # Define timeout threshold (jobs older than EVAL_JOB_TIMEOUT seconds without completion)
+                        current_time = datetime.now(timezone.utc)
+                        stale_threshold = current_time - timedelta(
+                            seconds=EVAL_JOB_TIMEOUT
+                        )
+                        # Remove timezone info to match database column type
+                        stale_threshold = stale_threshold.replace(tzinfo=None)
+
+                        # Find jobs that have been running for too long
+                        result = await session.execute(
+                            select(BackendEvaluationJob).where(
+                                BackendEvaluationJob.created_at < stale_threshold
+                            )
+                        )
+
+                        stale_jobs = result.scalars().all()
+
+                        for job in stale_jobs:
+                            # Check if this job has any recent status updates
+                            status_result = await session.execute(
+                                select(BackendEvaluationJobStatus)
+                                .where(BackendEvaluationJobStatus.job_id == job.id)
+                                .order_by(BackendEvaluationJobStatus.created_at.desc())
+                                .limit(1)
+                            )
+                            latest_status = status_result.scalar()
+
+                            # If no status or last status is not terminal, mark as failed
+                            if not latest_status or latest_status.status not in [
+                                EvaluationStatus.COMPLETED,
+                                EvaluationStatus.FAILED,
+                                EvaluationStatus.CANCELLED,
+                                EvaluationStatus.TIMEOUT,
+                            ]:
+                                logger.warning(f"Marking stale job {job.id} as TIMEOUT")
+
+                                # Create timeout status for all connected validators
+                                for (
+                                    validator_hotkey
+                                ) in self.validator_connections.values():
+                                    timeout_status = BackendEvaluationJobStatus(
+                                        id=next(self.id_generator),
+                                        job_id=job.id,
+                                        validator_hotkey=validator_hotkey,
+                                        status=EvaluationStatus.TIMEOUT,
+                                        detail="Job marked as timeout due to inactivity",
+                                    )
+                                    session.add(timeout_status)
+
+                                await session.commit()
+
+                                # Broadcast timeout event
+                                await event_broadcaster.broadcast_event(
+                                    EventType.JOB_STATUS_CHANGED,
+                                    {
+                                        "job_id": job.id,
+                                        "status": "TIMEOUT",
+                                        "detail": "Job marked as timeout due to inactivity",
+                                    },
+                                )
+
+                await asyncio.sleep(300)  # Check every 5 minutes
+
+            except Exception as e:
+                logger.error(f"Error monitoring stale jobs: {e}")
+                await asyncio.sleep(300)
 
     async def _monitor_validator_heartbeats(self) -> None:
         """Monitor validator heartbeats and cleanup stale connections."""

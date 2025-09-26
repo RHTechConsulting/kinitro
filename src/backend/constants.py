@@ -25,3 +25,6 @@ WEIGHT_BROADCAST_INTERVAL = 600  # 10 minutes
 # Task startup delays (in seconds)
 SCORE_EVALUATION_STARTUP_DELAY = 10
 WEIGHT_BROADCAST_STARTUP_DELAY = 10
+
+# Evaluation job timeout (in seconds)
+EVAL_JOB_TIMEOUT = 7200  # 2 hours

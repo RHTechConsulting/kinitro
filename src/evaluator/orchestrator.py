@@ -49,6 +49,7 @@ class Orchestrator:
         # Track running jobs for concurrent execution
         self.running_jobs: Dict[str, Dict] = {}  # job_id -> job_info
         self.max_concurrent_jobs = config.max_concurrent_jobs
+        self.job_timeout = config.settings.get("job_timeout_seconds", EVAL_TIMEOUT)
 
         # Initialize Ray with explicit configuration
         if not ray.is_initialized():
@@ -88,7 +89,7 @@ class Orchestrator:
             created_at=datetime.now(timezone.utc),
         )
 
-        # Create job entry in the database
+        # Create job entry in the database with QUEUED status
         try:
             self.db.create_evaluation_job(evaluation_job)
         except Exception as e:
@@ -96,6 +97,18 @@ class Orchestrator:
                 f"Failed to create evaluation job {eval_job_msg.job_id} in DB: {e}"
             )
             return None
+
+        # Update status to STARTING
+        try:
+            self.db.update_evaluation_job(
+                eval_job_msg.job_id,
+                {
+                    "status": EvaluationStatus.STARTING,
+                    "started_at": datetime.now(timezone.utc),
+                },
+            )
+        except Exception as e:
+            logger.error(f"Failed to update job status to STARTING: {e}")
 
         # Start a container for this evaluation job
         repo = "https://huggingface.co/" + eval_job_msg.hf_repo_id
@@ -179,6 +192,14 @@ class Orchestrator:
         # Test RPC connection
         res = await worker.test_rpc.remote(worker_to_rpc_queue, rpc_to_worker_queue)
         logger.info(f"RPC test result for job {eval_job_msg.job_id}: {res}")
+
+        # Update status to RUNNING
+        try:
+            self.db.update_evaluation_job(
+                eval_job_msg.job_id, {"status": EvaluationStatus.RUNNING}
+            )
+        except Exception as e:
+            logger.error(f"Failed to update job status to RUNNING: {e}")
 
         # Start the evaluation (non-blocking)
         logger.info(f"Starting evaluation for job {eval_job_msg.job_id}")
@@ -320,7 +341,11 @@ class Orchestrator:
                 # Update database
                 try:
                     self.db.update_evaluation_job(
-                        job_id, {"status": EvaluationStatus.COMPLETED}
+                        job_id,
+                        {
+                            "status": EvaluationStatus.COMPLETED,
+                            "completed_at": datetime.now(timezone.utc),
+                        },
                     )
                 except Exception as e:
                     logger.error(f"Failed to update job status for job {job_id}: {e}")
@@ -382,11 +407,16 @@ class Orchestrator:
             elapsed = (
                 datetime.now(timezone.utc) - job_context["start_time"]
             ).total_seconds()
-            if elapsed > EVAL_TIMEOUT:
+            if elapsed > self.job_timeout:
                 logger.error(f"Job {job_id} timed out after {elapsed} seconds")
                 ray.cancel(evaluation_future)
                 self.db.update_evaluation_job(
-                    job_id, {"status": EvaluationStatus.FAILED}
+                    job_id,
+                    {
+                        "status": EvaluationStatus.TIMEOUT,
+                        "error_message": f"Job timed out after {elapsed:.1f} seconds",
+                        "completed_at": datetime.now(timezone.utc),
+                    },
                 )
 
                 # Clean up Ray worker and container resources on timeout
@@ -425,7 +455,14 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Error monitoring job {job_id}: {e}")
-            self.db.update_evaluation_job(job_id, {"status": EvaluationStatus.FAILED})
+            self.db.update_evaluation_job(
+                job_id,
+                {
+                    "status": EvaluationStatus.FAILED,
+                    "error_message": str(e),
+                    "completed_at": datetime.now(timezone.utc),
+                },
+            )
 
             # Clean up Ray worker and container resources on error
             try:
@@ -493,8 +530,117 @@ class Orchestrator:
 
             await asyncio.sleep(1)  # Check every second
 
+    async def recover_stale_jobs(self):
+        """Recover jobs that were running when orchestrator crashed."""
+        logger.info("Checking for stale jobs from previous orchestrator run...")
+
+        # Find jobs that are stuck in STARTING or RUNNING state
+        stale_statuses = [EvaluationStatus.STARTING, EvaluationStatus.RUNNING]
+        for status in stale_statuses:
+            stale_jobs = self.db.get_evaluation_jobs_by_status(status)
+            logger.info(f"Found {len(stale_jobs)} jobs in {status.value} state")
+            if stale_jobs:
+                for job in stale_jobs:
+                    logger.info(f"Marking stale job {job.id} as FAILED")
+                    # Update job status to FAILED with error message
+                    self.db.update_evaluation_job(
+                        job.id,
+                        {
+                            "status": EvaluationStatus.FAILED,
+                            "error_message": "Job was interrupted due to orchestrator restart",
+                            "completed_at": datetime.now(timezone.utc),
+                        },
+                    )
+
+                    # Queue failure result message to backend
+                    eval_result_msg = EvalResultMessage(
+                        job_id=job.id,
+                        validator_hotkey=self.keypair.ss58_address,
+                        miner_hotkey=job.miner_hotkey,
+                        competition_id=job.competition_id,
+                        env_provider=job.env_provider,
+                        benchmark_name=job.benchmark_name,
+                        config=job.config,
+                        score=0.0,
+                        success_rate=0.0,
+                        avg_reward=0.0,
+                        total_episodes=0,
+                        logs="Job failed due to orchestrator restart",
+                        error="Orchestrator restart - job was not completed",
+                        extra_data=None,
+                    )
+                    await self.db.queue_evaluation_result_msg(eval_result_msg)
+
+                    # Clean up any orphaned containers for this job
+                    if job.submission_id:
+                        try:
+                            containers = Containers()
+                            containers.cleanup_container(job.submission_id)
+                            logger.info(
+                                f"Cleaned up orphaned container for submission {job.submission_id}"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to cleanup container for submission {job.submission_id}: {e}"
+                            )
+
+        logger.info("Stale job recovery completed")
+
+    async def periodic_cleanup(self):
+        """Periodic cleanup of orphaned containers and resources."""
+        while True:
+            try:
+                await asyncio.sleep(600)  # Run every 10 minutes
+                logger.info("Starting periodic cleanup...")
+
+                containers = Containers()
+
+                # Get all completed/failed jobs from the last 24 hours
+                # that might have orphaned containers
+                failed_jobs = self.db.get_evaluation_jobs_by_status(
+                    EvaluationStatus.FAILED
+                )
+                timeout_jobs = self.db.get_evaluation_jobs_by_status(
+                    EvaluationStatus.TIMEOUT
+                )
+                completed_jobs = self.db.get_evaluation_jobs_by_status(
+                    EvaluationStatus.COMPLETED
+                )
+
+                # Clean up containers for old completed/failed jobs
+                for job_list in [failed_jobs, timeout_jobs, completed_jobs]:
+                    for job in job_list:
+                        # Only cleanup jobs older than 1 hour
+                        if (
+                            job.completed_at
+                            and (
+                                datetime.now(timezone.utc) - job.completed_at
+                            ).total_seconds()
+                            > EVAL_TIMEOUT
+                        ):
+                            try:
+                                if job.submission_id:
+                                    containers.cleanup_container(job.submission_id)
+                                    logger.debug(
+                                        f"Cleaned up container for old job {job.id}"
+                                    )
+                            except Exception as e:
+                                logger.debug(
+                                    f"Container cleanup failed for job {job.id}: {e}"
+                                )
+
+                gc.collect()
+
+                logger.info("Periodic cleanup completed")
+            except Exception as e:
+                logger.error(f"Error during periodic cleanup: {e}")
+
     async def start(self):
         logger.info("Starting orchestrator...")
+
+        # Recover any stale jobs from previous run
+        await self.recover_stale_jobs()
+
         conn = await asyncpg.connect(dsn=self.config.pg_database)
 
         driver = AsyncpgDriver(conn)
@@ -503,6 +649,10 @@ class Orchestrator:
         # Start the job monitoring task
         monitor_task = asyncio.create_task(self.monitor_running_jobs())
         logger.info("Started job monitoring task")
+
+        # Start periodic cleanup task
+        cleanup_task = asyncio.create_task(self.periodic_cleanup())
+        logger.info("Started periodic cleanup task")
 
         @pgq.entrypoint("add_job")
         async def process(job: Job) -> None:
@@ -526,6 +676,7 @@ class Orchestrator:
             await pgq.run()
         finally:
             monitor_task.cancel()
+            cleanup_task.cancel()
 
         await asyncio.Future()
 
