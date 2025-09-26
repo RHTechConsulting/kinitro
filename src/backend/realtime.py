@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from fastapi import WebSocket
 from sqlalchemy import func, select
 
+from backend.constants import INITIAL_STATE_DATA_LIMIT
 from core.log import get_logger
 from core.messages import (
     EventMessage,
@@ -38,6 +39,7 @@ try:
         BackendEvaluationResult,
         BackendState,
         Competition,
+        EpisodeData,
         MinerSubmission,
         ValidatorConnection,
     )
@@ -383,22 +385,48 @@ class RealtimeEventBroadcaster:
             if event_type == EventType.STATS_UPDATED:
                 return await self._get_initial_stats_data(session)
 
-            elif (
-                event_type == EventType.JOB_STATUS_CHANGED
-                or event_type == EventType.JOB_CREATED
-            ):
+            # Job-related events
+            elif event_type in [
+                EventType.JOB_STATUS_CHANGED,
+                EventType.JOB_CREATED,
+                EventType.JOB_COMPLETED,
+            ]:
                 return await self._get_initial_job_data(session, filters)
 
-            elif event_type == EventType.EVALUATION_COMPLETED:
+            # Evaluation-related events
+            elif event_type in [
+                EventType.EVALUATION_STARTED,
+                EventType.EVALUATION_COMPLETED,
+                EventType.EVALUATION_PROGRESS,
+            ]:
                 return await self._get_initial_evaluation_data(session, filters)
 
-            elif (
-                event_type == EventType.COMPETITION_ACTIVATED
-                or event_type == EventType.COMPETITION_CREATED
-            ):
+            # Competition-related events
+            elif event_type in [
+                EventType.COMPETITION_ACTIVATED,
+                EventType.COMPETITION_CREATED,
+                EventType.COMPETITION_UPDATED,
+                EventType.COMPETITION_DEACTIVATED,
+            ]:
                 return await self._get_initial_competition_data(session, filters)
 
-            # Add more event types as needed
+            # Submission events
+            elif event_type == EventType.SUBMISSION_RECEIVED:
+                return await self._get_initial_submission_data(session, filters)
+
+            # Episode events (but not EPISODE_STEP - too granular)
+            elif event_type in [EventType.EPISODE_COMPLETED, EventType.EPISODE_STARTED]:
+                return await self._get_initial_episode_data(session, filters)
+
+            # Skip these events - either not suitable for initial data or too granular
+            elif event_type in [
+                EventType.VALIDATOR_CONNECTED,
+                EventType.VALIDATOR_DISCONNECTED,
+                EventType.EPISODE_STEP,
+            ]:
+                return []
+
+            # Unknown event types
             else:
                 logger.debug(
                     f"No initial state data handler for event type: {event_type}"
@@ -516,7 +544,7 @@ class RealtimeEventBroadcaster:
             return []
 
     async def _get_initial_job_data(
-        self, session, filters: Dict[str, Any], limit: int = 50
+        self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
     ) -> List[Dict[str, Any]]:
         """Get recent job status data."""
         try:
@@ -561,7 +589,7 @@ class RealtimeEventBroadcaster:
             return []
 
     async def _get_initial_evaluation_data(
-        self, session, filters: Dict[str, Any], limit: int = 50
+        self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
     ) -> List[Dict[str, Any]]:
         """Get recent evaluation results."""
         try:
@@ -653,6 +681,105 @@ class RealtimeEventBroadcaster:
 
         except Exception as e:
             logger.error(f"Error getting initial competition data: {str(e)}")
+            return []
+
+    async def _get_initial_submission_data(
+        self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
+    ) -> List[Dict[str, Any]]:
+        """Get recent miner submissions."""
+        try:
+            # MinerSubmission is imported at module level
+
+            query = select(MinerSubmission)
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "competition_id":
+                        query = query.where(
+                            MinerSubmission.competition_id == filter_value
+                        )
+                    elif filter_key == "miner_hotkey":
+                        query = query.where(
+                            MinerSubmission.miner_hotkey == filter_value
+                        )
+                    elif filter_key == "submission_id":
+                        query = query.where(MinerSubmission.id == filter_value)
+
+            query = query.order_by(MinerSubmission.created_at.desc()).limit(limit)
+
+            result = await session.execute(query)
+            submissions = result.scalars().all()
+
+            submission_data = []
+            for submission in submissions:
+                data = {
+                    "id": submission.id,
+                    "competition_id": submission.competition_id,
+                    "miner_hotkey": submission.miner_hotkey,
+                    "hf_repo_id": submission.hf_repo_id,
+                    "block_number": submission.block_number,
+                    "created_at": submission.created_at.isoformat(),
+                }
+                submission_data.append(data)
+
+            return submission_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial submission data: {str(e)}")
+            return []
+
+    async def _get_initial_episode_data(
+        self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
+    ) -> List[Dict[str, Any]]:
+        """Get recent episode data."""
+        try:
+            # EpisodeData is imported at module level
+
+            query = select(EpisodeData)
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "job_id":
+                        query = query.where(EpisodeData.job_id == filter_value)
+                    elif filter_key == "submission_id":
+                        query = query.where(EpisodeData.submission_id == filter_value)
+                    elif filter_key == "episode_id":
+                        query = query.where(EpisodeData.episode_id == filter_value)
+
+            query = query.order_by(EpisodeData.created_at.desc()).limit(limit)
+
+            result = await session.execute(query)
+            episodes = result.scalars().all()
+
+            episode_data = []
+            for episode in episodes:
+                data = {
+                    "id": episode.id,
+                    "job_id": episode.job_id,
+                    "submission_id": episode.submission_id,
+                    "episode_id": episode.episode_id,
+                    "env_name": episode.env_name,
+                    "benchmark_name": episode.benchmark_name,
+                    "total_reward": episode.total_reward,
+                    "success": episode.success,
+                    "steps": episode.steps,
+                    "start_time": episode.start_time.isoformat()
+                    if episode.start_time
+                    else None,
+                    "end_time": episode.end_time.isoformat()
+                    if episode.end_time
+                    else None,
+                    "extra_metrics": episode.extra_metrics,
+                    "created_at": episode.created_at.isoformat(),
+                }
+                episode_data.append(data)
+
+            return episode_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial episode data: {str(e)}")
             return []
 
 
