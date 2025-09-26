@@ -611,23 +611,28 @@ class Orchestrator:
                 for job_list in [failed_jobs, timeout_jobs, completed_jobs]:
                     for job in job_list:
                         # Only cleanup jobs older than 1 hour
-                        if (
-                            job.completed_at
-                            and (
-                                datetime.now(timezone.utc) - job.completed_at
-                            ).total_seconds()
-                            > EVAL_TIMEOUT
-                        ):
-                            try:
-                                if job.submission_id:
-                                    containers.cleanup_container(job.submission_id)
-                                    logger.debug(
-                                        f"Cleaned up container for old job {job.id}"
-                                    )
-                            except Exception as e:
-                                logger.debug(
-                                    f"Container cleanup failed for job {job.id}: {e}"
+                        if job.completed_at:
+                            # Ensure both datetimes have timezone info for comparison
+                            current_time = datetime.now(timezone.utc)
+                            completed_time = job.completed_at
+                            if completed_time.tzinfo is None:
+                                completed_time = completed_time.replace(
+                                    tzinfo=timezone.utc
                                 )
+
+                            if (
+                                current_time - completed_time
+                            ).total_seconds() > EVAL_TIMEOUT:
+                                try:
+                                    if job.submission_id:
+                                        containers.cleanup_container(job.submission_id)
+                                        logger.debug(
+                                            f"Cleaned up container for old job {job.id}"
+                                        )
+                                except Exception as e:
+                                    logger.debug(
+                                        f"Container cleanup failed for job {job.id}: {e}"
+                                    )
 
                 gc.collect()
 
