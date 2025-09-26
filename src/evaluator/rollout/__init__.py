@@ -61,15 +61,25 @@ class RolloutCluster:
         if worker in self.workers:
             self.workers.remove(worker)
         try:
+            # Try to call cleanup on the worker before killing it
+            try:
+                ray.get(worker.cleanup.remote(), timeout=2)
+                logger.debug("Worker cleanup completed before deletion")
+            except Exception as e:
+                logger.debug(f"Worker cleanup before deletion failed: {e}")
+
+            # Kill the worker actor
             ray.kill(worker)
         except Exception as e:
             logger.warning(f"Failed to kill worker: {e}")
 
     def cleanup_all_workers(self):
         """Clean up all workers in the cluster."""
+        logger.info(f"Cleaning up {len(self.workers)} workers in cluster {self.name}")
         for worker in list(self.workers):
             self.delete_worker(worker)
         self.workers.clear()
+        logger.info(f"Completed cleanup of all workers in cluster {self.name}")
 
 
 @ray.remote(
@@ -115,31 +125,45 @@ class RolloutWorker:
 
     def cleanup(self):
         """Clean up resources held by this worker."""
+        logger.info(f"Worker {self.rollout_worker_id} starting cleanup")
+
         # Close all environment instances
         if hasattr(self, "env_manager") and self.env_manager:
             try:
-                # Close any open environments
+                # Close any open environments properly
+                if hasattr(self.env_manager, "envs"):
+                    for env in list(self.env_manager.envs.values()):
+                        try:
+                            env.close()
+                        except Exception:
+                            pass
+                    self.env_manager.envs.clear() if hasattr(
+                        self.env_manager, "envs"
+                    ) else None
                 self.env_manager = None
             except Exception as e:
                 logger.warning(f"Failed to cleanup env_manager: {e}")
 
         # Clear episode loggers
         if hasattr(self, "episode_loggers"):
+            for logger_instance in self.episode_loggers.values():
+                try:
+                    if hasattr(logger_instance, "close"):
+                        logger_instance.close()
+                except Exception:
+                    pass
             self.episode_loggers.clear()
 
         # Clear any large data structures
         self.benchmark_specs = None
+        self.submission_container_address = None
+        self.submission_container_host = None
+        self.submission_container_port = None
 
-        # Force garbage collection multiple times to ensure cleanup
-        for _ in range(3):
-            gc.collect()
+        # Force garbage collection
+        gc.collect()
 
-        # Clear PyTorch cache if available
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            logger.debug(f"Could not clear PyTorch cache: {e}")
+        logger.info(f"Worker {self.rollout_worker_id} cleanup completed")
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
@@ -207,6 +231,16 @@ class RolloutWorker:
 
             # Clean up after evaluation
             self.cleanup()
+
+            # Additional cleanup for task results
+            for result in task_results:
+                try:
+                    if hasattr(result, "episodes"):
+                        for episode in result.episodes:
+                            if hasattr(episode, "clear"):
+                                episode.clear()
+                except Exception:
+                    pass
 
             return task_results
 

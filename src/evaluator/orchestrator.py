@@ -50,6 +50,23 @@ class Orchestrator:
         self.running_jobs: Dict[str, Dict] = {}  # job_id -> job_info
         self.max_concurrent_jobs = config.max_concurrent_jobs
 
+        # Initialize Ray with explicit configuration
+        if not ray.is_initialized():
+            init_kwargs = {
+                "num_cpus": config.settings.get("ray_num_cpus", 4),
+                "num_gpus": config.settings.get("ray_num_gpus", 0),
+                "object_store_memory": config.settings.get(
+                    "ray_object_store_memory", None
+                ),
+                "_memory": config.settings.get("ray_memory", None),
+                "logging_level": "info",
+            }
+
+            ray.init(**init_kwargs)
+            logger.info("Ray initialized with explicit configuration")
+        else:
+            logger.info("Ray already initialized")
+
         logger.info(f"Orchestrator initialized with config: {self.config}")
 
     async def setup_job(self, job: Job) -> Optional[Dict]:
@@ -169,15 +186,97 @@ class Orchestrator:
             worker_to_rpc_queue, rpc_to_worker_queue
         )
 
-        return {
+        job_context = {
             "job_id": eval_job_msg.job_id,
             "submission_id": eval_job_msg.submission_id,
             "eval_job_msg": eval_job_msg,
             "worker": worker,
             "cluster": cluster,
             "evaluation_future": evaluation_future,
+            "worker_to_rpc_queue": worker_to_rpc_queue,
+            "rpc_to_worker_queue": rpc_to_worker_queue,
             "start_time": datetime.now(timezone.utc),
         }
+
+        logger.info(
+            f"Created job context for {eval_job_msg.job_id} with queues: worker_to_rpc={worker_to_rpc_queue is not None}, rpc_to_worker={rpc_to_worker_queue is not None}"
+        )
+
+        return job_context
+
+    def _cleanup_queues(self, job_context: Dict):
+        """Clean up Ray Queue actors for a job."""
+        job_id = job_context.get("job_id")
+
+        # Track cleanup calls
+        if not hasattr(self, "_cleanup_calls"):
+            self._cleanup_calls = {}
+        self._cleanup_calls[job_id] = self._cleanup_calls.get(job_id, 0) + 1
+
+        logger.info(f"Cleanup call #{self._cleanup_calls[job_id]} for job {job_id}")
+
+        # Debug: Log what's in job_context
+        logger.info(f"Job context keys for job {job_id}: {list(job_context.keys())}")
+
+        logger.info(f"Starting queue cleanup for job {job_id}")
+        try:
+            # Get queue actors
+            worker_to_rpc = job_context.get("worker_to_rpc_queue")
+            rpc_to_worker = job_context.get("rpc_to_worker_queue")
+
+            logger.info(
+                f"Retrieved from context - worker_to_rpc type: {type(worker_to_rpc)}, rpc_to_worker type: {type(rpc_to_worker)}"
+            )
+
+            # Shutdown queue actors
+            if worker_to_rpc is not None:
+                try:
+                    if (
+                        hasattr(worker_to_rpc, "actor")
+                        and worker_to_rpc.actor is not None
+                    ):
+                        logger.info(
+                            f"Shutting down worker_to_rpc queue for job {job_id}"
+                        )
+                        worker_to_rpc.shutdown(force=True)
+                        logger.info(
+                            f"Successfully shutdown worker_to_rpc queue for job {job_id}"
+                        )
+                    else:
+                        logger.info(
+                            f"worker_to_rpc queue already shutdown for job {job_id}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to shutdown worker_to_rpc queue: {e}")
+            else:
+                logger.warning(f"worker_to_rpc queue is None for job {job_id}")
+
+            if rpc_to_worker is not None:
+                try:
+                    if (
+                        hasattr(rpc_to_worker, "actor")
+                        and rpc_to_worker.actor is not None
+                    ):
+                        logger.info(
+                            f"Shutting down rpc_to_worker queue for job {job_id}"
+                        )
+                        rpc_to_worker.shutdown(force=True)
+                        logger.info(
+                            f"Successfully shutdown rpc_to_worker queue for job {job_id}"
+                        )
+                    else:
+                        logger.info(
+                            f"rpc_to_worker queue already shutdown for job {job_id}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to shutdown rpc_to_worker queue: {e}")
+            else:
+                logger.warning(f"rpc_to_worker queue is None for job {job_id}")
+
+            logger.info(f"Completed Ray Queue actors cleanup for job {job_id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to cleanup queues: {e}")
 
     async def monitor_job(self, job_context: Dict):
         """Monitor a running job and handle completion."""
@@ -247,10 +346,18 @@ class Orchestrator:
 
                 # Clean up Ray worker and container resources
                 try:
-                    # Clean up Ray worker first
+                    # Clean up queues first
+                    self._cleanup_queues(job_context)
+
+                    # Clean up Ray worker
                     cluster = job_context.get("cluster")
                     worker = job_context.get("worker")
                     if cluster and worker:
+                        # Call cleanup on the worker before killing it
+                        try:
+                            ray.get(worker.cleanup.remote(), timeout=5)
+                        except Exception as e:
+                            logger.warning(f"Worker cleanup failed: {e}")
                         cluster.delete_worker(worker)
                         logger.info(f"Cleaned up Ray worker for job {job_id}")
 
@@ -261,15 +368,9 @@ class Orchestrator:
                         f"Cleaned up container resources for submission {submission_id}"
                     )
 
-                    # Force garbage collection
+                    # Clear references
+                    del results
                     gc.collect()
-
-                    # Clear Ray object store for this job
-                    if results:
-                        try:
-                            del results
-                        except:
-                            pass
                 except Exception as e:
                     logger.error(
                         f"Failed to clean up resources for submission {submission_id}: {e}"
@@ -290,10 +391,18 @@ class Orchestrator:
 
                 # Clean up Ray worker and container resources on timeout
                 try:
-                    # Clean up Ray worker first
+                    # Clean up queues first
+                    self._cleanup_queues(job_context)
+
+                    # Clean up Ray worker
                     cluster = job_context.get("cluster")
                     worker = job_context.get("worker")
                     if cluster and worker:
+                        # Try to call cleanup on the worker before killing it
+                        try:
+                            ray.get(worker.cleanup.remote(), timeout=2)
+                        except Exception as e:
+                            logger.warning(f"Worker cleanup failed on timeout: {e}")
                         cluster.delete_worker(worker)
                         logger.info(f"Cleaned up Ray worker for timed out job {job_id}")
 
@@ -304,7 +413,6 @@ class Orchestrator:
                         f"Cleaned up container resources for timed out submission {submission_id}"
                     )
 
-                    # Force garbage collection
                     gc.collect()
                 except Exception as e:
                     logger.error(
@@ -321,10 +429,18 @@ class Orchestrator:
 
             # Clean up Ray worker and container resources on error
             try:
-                # Clean up Ray worker first
+                # Clean up queues first
+                self._cleanup_queues(job_context)
+
+                # Clean up Ray worker
                 cluster = job_context.get("cluster")
                 worker = job_context.get("worker")
                 if cluster and worker:
+                    # Try to call cleanup on the worker before killing it
+                    try:
+                        ray.get(worker.cleanup.remote(), timeout=2)
+                    except Exception as e:
+                        logger.warning(f"Worker cleanup failed on error: {e}")
                     cluster.delete_worker(worker)
                     logger.info(f"Cleaned up Ray worker for failed job {job_id}")
 
@@ -335,7 +451,6 @@ class Orchestrator:
                     f"Cleaned up container resources for failed submission {submission_id}"
                 )
 
-                # Force garbage collection
                 gc.collect()
             except Exception as ex:
                 logger.error(
@@ -375,8 +490,6 @@ class Orchestrator:
                     logger.info(
                         f"Job {job_id} removed from running jobs. Remaining: {len(self.running_jobs)}"
                     )
-                    # Force garbage collection after each job cleanup
-                    gc.collect()
 
             await asyncio.sleep(1)  # Check every second
 
@@ -423,9 +536,19 @@ class Orchestrator:
             job_context = self.running_jobs.get(job_id)
             if job_context:
                 try:
+                    # Clean up queues first
+                    self._cleanup_queues(job_context)
+
                     cluster = job_context.get("cluster")
                     worker = job_context.get("worker")
                     if cluster and worker:
+                        # Try to call cleanup on the worker before killing it
+                        try:
+                            ray.get(worker.cleanup.remote(), timeout=2)
+                        except Exception as e:
+                            logger.warning(
+                                f"Worker cleanup failed during shutdown: {e}"
+                            )
                         cluster.delete_worker(worker)
                     submission_id = job_context.get("submission_id")
                     if submission_id:
@@ -440,8 +563,6 @@ class Orchestrator:
         if ray.is_initialized():
             ray.shutdown()
             logger.info("Ray shutdown complete")
-
-        gc.collect()
 
 
 if __name__ == "__main__":
