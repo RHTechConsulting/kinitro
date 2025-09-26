@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import time
 from typing import Any, Dict, List, Optional
 
@@ -57,11 +58,23 @@ class RolloutCluster:
         return worker
 
     def delete_worker(self, worker: ray.actor.ActorHandle):
-        self.workers.remove(worker)
-        ray.kill(worker)
+        if worker in self.workers:
+            self.workers.remove(worker)
+        try:
+            ray.kill(worker)
+        except Exception as e:
+            logger.warning(f"Failed to kill worker: {e}")
+
+    def cleanup_all_workers(self):
+        """Clean up all workers in the cluster."""
+        for worker in list(self.workers):
+            self.delete_worker(worker)
+        self.workers.clear()
 
 
-@ray.remote
+@ray.remote(
+    max_restarts=1, max_task_retries=0, memory=2 * 1024 * 1024 * 1024
+)  # 2GB memory limit per worker
 class RolloutWorker:
     def __init__(
         self,
@@ -99,6 +112,34 @@ class RolloutWorker:
         self.r2_config = r2_config
         self.database_url = database_url
         self.episode_loggers: Dict[str, EpisodeLogger] = {}
+
+    def cleanup(self):
+        """Clean up resources held by this worker."""
+        # Close all environment instances
+        if hasattr(self, "env_manager") and self.env_manager:
+            try:
+                # Close any open environments
+                self.env_manager = None
+            except Exception as e:
+                logger.warning(f"Failed to cleanup env_manager: {e}")
+
+        # Clear episode loggers
+        if hasattr(self, "episode_loggers"):
+            self.episode_loggers.clear()
+
+        # Clear any large data structures
+        self.benchmark_specs = None
+
+        # Force garbage collection multiple times to ensure cleanup
+        for _ in range(3):
+            gc.collect()
+
+        # Clear PyTorch cache if available
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.debug(f"Could not clear PyTorch cache: {e}")
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
@@ -163,10 +204,18 @@ class RolloutWorker:
 
             self.eval_end = time.time()
             self._log_evaluation_summary(task_results)
+
+            # Clean up after evaluation
+            self.cleanup()
+
             return task_results
 
-        async with capnp.kj_loop():
-            return await _run_all_tasks_inner()
+        try:
+            async with capnp.kj_loop():
+                return await _run_all_tasks_inner()
+        finally:
+            # Ensure cleanup happens even on exception
+            self.cleanup()
 
     async def run_env(
         self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue
@@ -224,6 +273,15 @@ class RolloutWorker:
                 continue
 
         env.close()
+
+        # Clean up environment resources
+        del env
+        gc.collect()
+
+        # Clean up episode logger after use
+        if env_key in self.episode_loggers:
+            del self.episode_loggers[env_key]
+
         return EnvResult.from_episodes(env_spec, episodes)
 
     async def run_episode(
@@ -309,8 +367,9 @@ class RolloutWorker:
                 total_reward += float(reward)
                 step_count += 1
 
+                # Only keep minimal step info to reduce memory usage
                 episode_steps.append(
-                    {"step": step_count, "reward": reward, "done": done, "info": info}
+                    {"step": step_count, "reward": float(reward), "done": bool(done)}
                 )
 
                 # Log step data if logger is available
@@ -380,14 +439,20 @@ class RolloutWorker:
         episode_duration = time.time() - episode_start
         success = info.get("success", False) if info else False
 
+        # Only keep essential episode info to reduce memory
         episode_result = EpisodeResult(
             episode_id=episode_id,
             env_spec=env_spec,
             reward=total_reward,
             steps=step_count,
             success=success,
-            info={"duration": episode_duration, "episode_steps": episode_steps},
+            info={"duration": episode_duration},  # Removed episode_steps to save memory
         )
+
+        # Clear episode steps data
+        episode_steps.clear()
+        del episode_steps
+        gc.collect()
 
         # End episode logging if logger is available
         if episode_logger:

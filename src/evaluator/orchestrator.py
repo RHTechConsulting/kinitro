@@ -1,7 +1,8 @@
 import asyncio
+import gc
 import threading
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import asyncpg
 import ray
@@ -244,16 +245,34 @@ class Orchestrator:
                 )
                 await self.db.queue_evaluation_result_msg(eval_result_msg)
 
-                # Clean up container resources
+                # Clean up Ray worker and container resources
                 try:
+                    # Clean up Ray worker first
+                    cluster = job_context.get("cluster")
+                    worker = job_context.get("worker")
+                    if cluster and worker:
+                        cluster.delete_worker(worker)
+                        logger.info(f"Cleaned up Ray worker for job {job_id}")
+
+                    # Then clean up container
                     containers = Containers()
                     containers.cleanup_container(submission_id)
                     logger.info(
                         f"Cleaned up container resources for submission {submission_id}"
                     )
+
+                    # Force garbage collection
+                    gc.collect()
+
+                    # Clear Ray object store for this job
+                    if results:
+                        try:
+                            del results
+                        except:
+                            pass
                 except Exception as e:
                     logger.error(
-                        f"Failed to clean up container for submission {submission_id}: {e}"
+                        f"Failed to clean up resources for submission {submission_id}: {e}"
                     )
 
                 return True  # Job completed
@@ -269,16 +288,27 @@ class Orchestrator:
                     job_id, {"status": EvaluationStatus.FAILED}
                 )
 
-                # Clean up container resources on timeout
+                # Clean up Ray worker and container resources on timeout
                 try:
+                    # Clean up Ray worker first
+                    cluster = job_context.get("cluster")
+                    worker = job_context.get("worker")
+                    if cluster and worker:
+                        cluster.delete_worker(worker)
+                        logger.info(f"Cleaned up Ray worker for timed out job {job_id}")
+
+                    # Then clean up container
                     containers = Containers()
                     containers.cleanup_container(submission_id)
                     logger.info(
                         f"Cleaned up container resources for timed out submission {submission_id}"
                     )
+
+                    # Force garbage collection
+                    gc.collect()
                 except Exception as e:
                     logger.error(
-                        f"Failed to clean up container for timed out submission {submission_id}: {e}"
+                        f"Failed to clean up resources for timed out submission {submission_id}: {e}"
                     )
 
                 return True  # Job timed out
@@ -289,16 +319,27 @@ class Orchestrator:
             logger.error(f"Error monitoring job {job_id}: {e}")
             self.db.update_evaluation_job(job_id, {"status": EvaluationStatus.FAILED})
 
-            # Clean up container resources on error
+            # Clean up Ray worker and container resources on error
             try:
+                # Clean up Ray worker first
+                cluster = job_context.get("cluster")
+                worker = job_context.get("worker")
+                if cluster and worker:
+                    cluster.delete_worker(worker)
+                    logger.info(f"Cleaned up Ray worker for failed job {job_id}")
+
+                # Then clean up container
                 containers = Containers()
                 containers.cleanup_container(submission_id)
                 logger.info(
                     f"Cleaned up container resources for failed submission {submission_id}"
                 )
+
+                # Force garbage collection
+                gc.collect()
             except Exception as ex:
                 logger.error(
-                    f"Failed to clean up container for failed submission {submission_id}: {ex}"
+                    f"Failed to clean up resources for failed submission {submission_id}: {ex}"
                 )
 
             return True  # Job failed
@@ -325,10 +366,17 @@ class Orchestrator:
 
                 # Remove completed jobs
                 for job_id in completed_jobs:
+                    # Clear job context before deletion
+                    job_context = self.running_jobs.get(job_id)
+                    if job_context:
+                        # Clear references to heavy objects
+                        job_context.clear()
                     del self.running_jobs[job_id]
                     logger.info(
                         f"Job {job_id} removed from running jobs. Remaining: {len(self.running_jobs)}"
                     )
+                    # Force garbage collection after each job cleanup
+                    gc.collect()
 
             await asyncio.sleep(1)  # Check every second
 
@@ -370,8 +418,30 @@ class Orchestrator:
 
     def stop(self):
         logger.info("Stopping orchestrator...")
-        # Add cleanup logic here
-        pass
+        # Clean up all running jobs
+        for job_id in list(self.running_jobs.keys()):
+            job_context = self.running_jobs.get(job_id)
+            if job_context:
+                try:
+                    cluster = job_context.get("cluster")
+                    worker = job_context.get("worker")
+                    if cluster and worker:
+                        cluster.delete_worker(worker)
+                    submission_id = job_context.get("submission_id")
+                    if submission_id:
+                        containers = Containers()
+                        containers.cleanup_container(submission_id)
+                except Exception as e:
+                    logger.error(f"Error cleaning up job {job_id}: {e}")
+
+        self.running_jobs.clear()
+
+        # Shutdown Ray if initialized
+        if ray.is_initialized():
+            ray.shutdown()
+            logger.info("Ray shutdown complete")
+
+        gc.collect()
 
 
 if __name__ == "__main__":

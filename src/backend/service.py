@@ -16,8 +16,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import (
     WebSocket,
 )
+from fiber.chain.fetch_nodes import _get_nodes_for_uid
 from fiber.chain.interface import get_substrate
-from fiber.chain.metagraph import Metagraph
+from fiber.chain.models import Node
 from snowflake import SnowflakeGenerator
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import (
@@ -94,7 +95,7 @@ class BackendService:
         self.substrate: Optional[Any] = (
             None  # async_substrate_interface.sync_substrate.SubstrateInterface
         )
-        self.metagraph: Optional[Metagraph] = None
+        self.nodes: Optional[Dict[SS58Address, Node]] = None
 
         # WebSocket connections
         self.active_connections: Dict[ConnectionId, WebSocket] = {}
@@ -216,10 +217,11 @@ class BackendService:
                 subtensor_address=self.config.settings["subtensor"]["address"],
             )
 
-            self.metagraph = Metagraph(
-                netuid=self.config.settings["subtensor"]["netuid"],
-                substrate=self.substrate,
+            node_list = _get_nodes_for_uid(
+                self.substrate, self.config.settings["subtensor"]["netuid"]
             )
+
+            self.nodes = {node.hotkey: node for node in node_list}
 
             logger.info("Blockchain connection initialized")
         except Exception as e:
@@ -271,7 +273,7 @@ class BackendService:
         """Background task to monitor blockchain for commitments."""
         while self._running:
             try:
-                if self.substrate and self.metagraph and self.async_session:
+                if self.substrate and self.nodes and self.async_session:
                     await self._sync_metagraph()
 
                     async with self.async_session() as session:
@@ -599,19 +601,17 @@ class BackendService:
             if not self.substrate:
                 logger.error("Substrate not initialized")
                 return
-            if not self.metagraph:
-                logger.error("Metagraph not initialized")
+            if not self.nodes:
+                logger.error("Node list not initialized")
                 return
 
             # Use cached scores from periodic evaluation
             miner_scores = self._latest_miner_scores.copy()
-            # get node uids from metagraph based on their hotkeys
-            nodes = self.metagraph.nodes if self.metagraph else {}
 
             # Build weights dict mapping UIDs to weights
             weights_dict: dict[int, float] = {}
             for hotkey, weight in miner_scores.items():
-                node = nodes.get(hotkey)
+                node = self.nodes.get(hotkey)
                 if node:
                     weights_dict[node.node_id] = weight
 
@@ -620,7 +620,7 @@ class BackendService:
                 return
 
             # Populate missing entries with 0.0 weight for all nodes
-            for node in nodes.values():
+            for node in self.nodes.values():
                 weights_dict.setdefault(node.node_id, 0.0)
 
             # Broadcast to validators
@@ -669,14 +669,21 @@ class BackendService:
             logger.error(f"Failed to get latest block: {e}")
             return -1
 
+    def _sync_nodes(self) -> None:
+        node_list = _get_nodes_for_uid(
+            self.substrate, self.config.settings["subtensor"]["netuid"]
+        )
+        self.nodes = {node.hotkey: node for node in node_list}
+
     async def _sync_metagraph(self) -> None:
-        """Sync metagraph nodes."""
+        """Sync metagraph nodes with memory leak prevention."""
         try:
-            if self.metagraph:
-                # Run in thread pool to avoid blocking
+            if self.nodes:
+                # Run sync in thread pool to avoid blocking
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(self.thread_pool, self.metagraph.sync_nodes)
-                logger.debug("Metagraph synced")
+                await loop.run_in_executor(self.thread_pool, self._sync_nodes)
+
+                logger.debug("Nodes synced")
         except Exception as e:
             logger.error(f"Failed to sync metagraph: {e}")
 
@@ -689,7 +696,7 @@ class BackendService:
         for node in nodes:
             try:
                 miner_commitments = query_commitments_from_substrate(
-                    self.config, node.hotkey, block=block_num
+                    self.config, self.substrate, node.hotkey, block=block_num
                 )
                 if miner_commitments:
                     commitments.extend(miner_commitments)
@@ -704,16 +711,15 @@ class BackendService:
     ) -> List[ChainCommitmentResponse]:
         """Query commitments for a block."""
         try:
-            if not self.metagraph:
+            if not self.nodes:
                 return []
 
-            # Get nodes as a list for thread pool execution
-            nodes = list(self.metagraph.nodes.values())
+            node_list = list(self.nodes.values())
 
             # Run commitment querying in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             commitments = await loop.run_in_executor(
-                self.thread_pool, self._query_commitments_sync, block_num, nodes
+                self.thread_pool, self._query_commitments_sync, block_num, node_list
             )
 
             return commitments
