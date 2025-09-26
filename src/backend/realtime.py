@@ -383,9 +383,6 @@ class RealtimeEventBroadcaster:
             if event_type == EventType.STATS_UPDATED:
                 return await self._get_initial_stats_data(session)
 
-            elif event_type == EventType.VALIDATOR_CONNECTED:
-                return await self._get_initial_validator_data(session, filters)
-
             elif (
                 event_type == EventType.JOB_STATUS_CHANGED
                 or event_type == EventType.JOB_CREATED
@@ -507,7 +504,7 @@ class RealtimeEventBroadcaster:
                     if validator.last_connected_at
                     else None,
                     "is_connected": validator.is_connected,
-                    "total_jobs_received": validator.total_jobs_received,
+                    "total_jobs_sent": validator.total_jobs_sent,
                     "total_results_received": validator.total_results_received,
                 }
                 validator_data.append(data)
@@ -552,7 +549,7 @@ class RealtimeEventBroadcaster:
                     "job_id": job_status.job_id,
                     "validator_hotkey": job_status.validator_hotkey,
                     "status": job_status.status.value,
-                    "message": job_status.message,
+                    "detail": job_status.detail,
                     "created_at": job_status.created_at.isoformat(),
                 }
                 job_data.append(data)
