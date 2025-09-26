@@ -88,6 +88,9 @@ async def lifespan(app: FastAPI):
     # Initialize the service but don't start background tasks yet
     await backend_service.startup()
 
+    # Set backend service reference in event broadcaster
+    event_broadcaster.set_backend_service(backend_service)
+
     # Start the event broadcaster
     await event_broadcaster.start()
 

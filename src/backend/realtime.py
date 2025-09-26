@@ -9,9 +9,10 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastapi import WebSocket
+from sqlalchemy import func, select
 
 from core.log import get_logger
 from core.messages import (
@@ -25,6 +26,24 @@ from core.messages import (
     UnsubscribeMessage,
     UnsubscriptionAckMessage,
 )
+
+if TYPE_CHECKING:
+    from backend.service import BackendService
+
+# Import models at runtime to avoid circular imports
+try:
+    from backend.models import (
+        BackendEvaluationJob,
+        BackendEvaluationJobStatus,
+        BackendEvaluationResult,
+        BackendState,
+        Competition,
+        MinerSubmission,
+        ValidatorConnection,
+    )
+except ImportError:
+    # Handle case where models might not be available during testing
+    pass
 
 logger = get_logger(__name__)
 
@@ -98,11 +117,16 @@ class RealtimeEventBroadcaster:
     Manages client connections and event distribution.
     """
 
-    def __init__(self):
+    def __init__(self, backend_service: Optional["BackendService"] = None):
         self.client_connections: Dict[str, ClientConnection] = {}
         self._broadcast_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
         self._broadcast_task = None
+        self.backend_service = backend_service
+
+    def set_backend_service(self, backend_service: "BackendService"):
+        """Set the backend service reference for database access."""
+        self.backend_service = backend_service
 
     async def start(self):
         """Start the event broadcaster."""
@@ -268,6 +292,11 @@ class RealtimeEventBroadcaster:
             )
             await connection.websocket.send_text(ack.model_dump_json())
 
+            # Send initial state data for relevant subscriptions
+            await self._send_initial_state_data(
+                connection, subscription_id, msg.subscription
+            )
+
             logger.info(
                 f"Client {connection.connection_id} subscribed to {msg.subscription.event_types} with subscription {subscription_id}"
             )
@@ -307,6 +336,327 @@ class RealtimeEventBroadcaster:
         connection.last_ping = datetime.now(timezone.utc)
         pong = PongMessage(request_id=data.get("request_id"))
         await connection.websocket.send_text(pong.model_dump_json())
+
+    async def _send_initial_state_data(
+        self,
+        connection: ClientConnection,
+        subscription_id: str,
+        subscription: SubscriptionRequest,
+    ):
+        """Send initial state data for applicable event types after subscription."""
+        if not self.backend_service or not self.backend_service.async_session:
+            logger.debug(
+                "No backend service or database session available for initial state data"
+            )
+            return
+
+        try:
+            async with self.backend_service.async_session() as session:
+                # Send initial data based on subscribed event types
+                for event_type in subscription.event_types:
+                    initial_data = await self._get_initial_state_for_event_type(
+                        session, event_type, subscription.filters
+                    )
+
+                    if initial_data:
+                        for data_item in initial_data:
+                            message = EventMessage(
+                                event_type=event_type,
+                                event_data=data_item,
+                                subscription_id=subscription_id,
+                            )
+                            await connection.websocket.send_text(
+                                message.model_dump_json()
+                            )
+                            logger.debug(
+                                f"Sent initial state data for {event_type} to client {connection.connection_id}"
+                            )
+
+        except Exception as e:
+            logger.error(f"Failed to send initial state data: {str(e)}")
+
+    async def _get_initial_state_for_event_type(
+        self, session, event_type: EventType, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Get initial state data for a specific event type."""
+        try:
+            if event_type == EventType.STATS_UPDATED:
+                return await self._get_initial_stats_data(session)
+
+            elif event_type == EventType.VALIDATOR_CONNECTED:
+                return await self._get_initial_validator_data(session, filters)
+
+            elif (
+                event_type == EventType.JOB_STATUS_CHANGED
+                or event_type == EventType.JOB_CREATED
+            ):
+                return await self._get_initial_job_data(session, filters)
+
+            elif event_type == EventType.EVALUATION_COMPLETED:
+                return await self._get_initial_evaluation_data(session, filters)
+
+            elif (
+                event_type == EventType.COMPETITION_ACTIVATED
+                or event_type == EventType.COMPETITION_CREATED
+            ):
+                return await self._get_initial_competition_data(session, filters)
+
+            # Add more event types as needed
+            else:
+                logger.debug(
+                    f"No initial state data handler for event type: {event_type}"
+                )
+                return []
+
+        except Exception as e:
+            logger.error(f"Error getting initial state data for {event_type}: {str(e)}")
+            return []
+
+    async def _get_initial_stats_data(self, session) -> List[Dict[str, Any]]:
+        """Get current backend statistics."""
+        try:
+            # Models are imported at module level
+
+            # Get competitions
+            comp_result = await session.execute(select(Competition))
+            competitions = comp_result.scalars().all()
+            active_comps = [c for c in competitions if c.active]
+            total_points = sum(c.points for c in active_comps)
+
+            # Get validators
+            val_result = await session.execute(
+                select(ValidatorConnection).where(ValidatorConnection.is_connected)
+            )
+            connected_validators = len(val_result.scalars().all())
+
+            # Get submissions count
+            sub_result = await session.execute(select(func.count(MinerSubmission.id)))
+            total_submissions = sub_result.scalar() or 0
+
+            # Get jobs count
+            job_result = await session.execute(
+                select(func.count(BackendEvaluationJob.id))
+            )
+            total_jobs = job_result.scalar() or 0
+
+            # Get results count
+            result_count = await session.execute(
+                select(func.count(BackendEvaluationResult.id))
+            )
+            total_results = result_count.scalar() or 0
+
+            # Get backend state
+            state_result = await session.execute(
+                select(BackendState).where(BackendState.id == 1)
+            )
+            state = state_result.scalar_one_or_none()
+
+            # Calculate competition percentages
+            comp_percentages = {}
+            for comp in active_comps:
+                percentage = (
+                    (comp.points / total_points * 100) if total_points > 0 else 0
+                )
+                comp_percentages[comp.id] = percentage
+
+            stats_data = {
+                "total_competitions": len(competitions),
+                "active_competitions": len(active_comps),
+                "total_points": total_points,
+                "connected_validators": connected_validators,
+                "total_submissions": total_submissions,
+                "total_jobs": total_jobs,
+                "total_results": total_results,
+                "last_seen_block": state.last_seen_block if state else 0,
+                "competition_percentages": comp_percentages,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            return [stats_data]
+
+        except Exception as e:
+            logger.error(f"Error getting initial stats data: {str(e)}")
+            return []
+
+    async def _get_initial_validator_data(
+        self, session, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Get currently connected validators."""
+        try:
+            # ValidatorConnection is imported at module level
+
+            query = select(ValidatorConnection).where(ValidatorConnection.is_connected)
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "validator_hotkey":
+                        query = query.where(
+                            ValidatorConnection.validator_hotkey == filter_value
+                        )
+
+            result = await session.execute(query)
+            validators = result.scalars().all()
+
+            validator_data = []
+            for validator in validators:
+                data = {
+                    "validator_hotkey": validator.validator_hotkey,
+                    "connection_id": validator.connection_id,
+                    "connected_at": validator.last_connected_at.isoformat()
+                    if validator.last_connected_at
+                    else None,
+                    "is_connected": validator.is_connected,
+                    "total_jobs_received": validator.total_jobs_received,
+                    "total_results_received": validator.total_results_received,
+                }
+                validator_data.append(data)
+
+            return validator_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial validator data: {str(e)}")
+            return []
+
+    async def _get_initial_job_data(
+        self, session, filters: Dict[str, Any], limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get recent job status data."""
+        try:
+            # BackendEvaluationJobStatus is imported at module level
+
+            query = select(BackendEvaluationJobStatus)
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "job_id":
+                        query = query.where(
+                            BackendEvaluationJobStatus.job_id == filter_value
+                        )
+                    elif filter_key == "validator_hotkey":
+                        query = query.where(
+                            BackendEvaluationJobStatus.validator_hotkey == filter_value
+                        )
+
+            query = query.order_by(BackendEvaluationJobStatus.created_at.desc()).limit(
+                limit
+            )
+
+            result = await session.execute(query)
+            job_statuses = result.scalars().all()
+
+            job_data = []
+            for job_status in job_statuses:
+                data = {
+                    "job_id": job_status.job_id,
+                    "validator_hotkey": job_status.validator_hotkey,
+                    "status": job_status.status.value,
+                    "message": job_status.message,
+                    "created_at": job_status.created_at.isoformat(),
+                }
+                job_data.append(data)
+
+            return job_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial job data: {str(e)}")
+            return []
+
+    async def _get_initial_evaluation_data(
+        self, session, filters: Dict[str, Any], limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get recent evaluation results."""
+        try:
+            # BackendEvaluationResult is imported at module level
+
+            query = select(BackendEvaluationResult)
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "job_id":
+                        query = query.where(
+                            BackendEvaluationResult.job_id == filter_value
+                        )
+                    elif filter_key == "validator_hotkey":
+                        query = query.where(
+                            BackendEvaluationResult.validator_hotkey == filter_value
+                        )
+                    elif filter_key == "miner_hotkey":
+                        query = query.where(
+                            BackendEvaluationResult.miner_hotkey == filter_value
+                        )
+                    elif filter_key == "competition_id":
+                        query = query.where(
+                            BackendEvaluationResult.competition_id == filter_value
+                        )
+
+            query = query.order_by(BackendEvaluationResult.result_time.desc()).limit(
+                limit
+            )
+
+            result = await session.execute(query)
+            results = result.scalars().all()
+
+            result_data = []
+            for eval_result in results:
+                data = eval_result.model_dump()
+                # Convert datetime fields to ISO format
+                for field in ["created_at", "updated_at", "result_time"]:
+                    if field in data and data[field]:
+                        data[field] = data[field].isoformat()
+                result_data.append(data)
+
+            return result_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial evaluation data: {str(e)}")
+            return []
+
+    async def _get_initial_competition_data(
+        self, session, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Get active competitions."""
+        try:
+            # Competition is imported at module level
+
+            query = select(Competition).where(Competition.active)
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "competition_id":
+                        query = query.where(Competition.id == filter_value)
+
+            result = await session.execute(query)
+            competitions = result.scalars().all()
+
+            competition_data = []
+            for competition in competitions:
+                data = {
+                    "id": competition.id,
+                    "name": competition.name,
+                    "description": competition.description,
+                    "benchmarks": competition.benchmarks,
+                    "points": competition.points,
+                    "active": competition.active,
+                    "start_time": competition.start_time.isoformat()
+                    if competition.start_time
+                    else None,
+                    "end_time": competition.end_time.isoformat()
+                    if competition.end_time
+                    else None,
+                    "created_at": competition.created_at.isoformat(),
+                    "updated_at": competition.updated_at.isoformat(),
+                }
+                competition_data.append(data)
+
+            return competition_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial competition data: {str(e)}")
+            return []
 
 
 # Global broadcaster instance
