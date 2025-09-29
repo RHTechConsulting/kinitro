@@ -9,12 +9,23 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from fastapi import WebSocket
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from backend.constants import INITIAL_STATE_DATA_LIMIT
+from backend.events import (
+    BaseEvent,
+    CompetitionCreatedEvent,
+    EpisodeCompletedEvent,
+    EvaluationCompletedEvent,
+    JobStatusChangedEvent,
+    StatsUpdatedEvent,
+    SubmissionReceivedEvent,
+    ValidatorConnectedEvent,
+)
 from core.log import get_logger
 from core.messages import (
     EventMessage,
@@ -168,15 +179,27 @@ class RealtimeEventBroadcaster:
             del self.client_connections[connection_id]
             logger.info(f"Client {connection_id} disconnected")
 
-    async def broadcast_event(self, event_type: EventType, event_data: Dict[str, Any]):
+    async def broadcast_event(
+        self, event_type: EventType, event_data: Union[BaseEvent, Dict[str, Any]]
+    ):
         """
         Broadcast an event to all relevant clients.
         This is the main entry point for sending events.
+
+        Args:
+            event_type: The type of event to broadcast
+            event_data: Event data as a Pydantic model or dictionary
         """
+        # Convert Pydantic model to dictionary if needed
+        if isinstance(event_data, BaseModel):
+            event_data_dict = event_data.model_dump(mode="json")
+        else:
+            event_data_dict = event_data
+
         logger.debug(
             f"Broadcasting event: {event_type} to {len(self.client_connections)} clients"
         )
-        await self._broadcast_queue.put((event_type, event_data))
+        await self._broadcast_queue.put((event_type, event_data_dict))
 
     async def _process_broadcast_queue(self):
         """Process events from the broadcast queue and send to clients."""
@@ -484,20 +507,21 @@ class RealtimeEventBroadcaster:
                 )
                 comp_percentages[comp.id] = percentage
 
-            stats_data = {
-                "total_competitions": len(competitions),
-                "active_competitions": len(active_comps),
-                "total_points": total_points,
-                "connected_validators": connected_validators,
-                "total_submissions": total_submissions,
-                "total_jobs": total_jobs,
-                "total_results": total_results,
-                "last_seen_block": state.last_seen_block if state else 0,
-                "competition_percentages": comp_percentages,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            # Create StatsUpdatedEvent model
+            stats_event = StatsUpdatedEvent(
+                total_competitions=len(competitions),
+                active_competitions=len(active_comps),
+                total_points=total_points,
+                connected_validators=connected_validators,
+                total_submissions=total_submissions,
+                total_jobs=total_jobs,
+                total_results=total_results,
+                last_seen_block=state.last_seen_block if state else 0,
+                competition_percentages=comp_percentages,
+            )
 
-            return [stats_data]
+            # Return as dictionary for compatibility with existing code
+            return [stats_event.model_dump(mode="json")]
 
         except Exception as e:
             logger.error(f"Error getting initial stats data: {str(e)}")
@@ -525,16 +549,14 @@ class RealtimeEventBroadcaster:
 
             validator_data = []
             for validator in validators:
-                data = {
-                    "validator_hotkey": validator.validator_hotkey,
-                    "connection_id": validator.connection_id,
-                    "connected_at": validator.last_connected_at.isoformat()
-                    if validator.last_connected_at
-                    else None,
-                    "is_connected": validator.is_connected,
-                    "total_jobs_sent": validator.total_jobs_sent,
-                    "total_results_received": validator.total_results_received,
-                }
+                # Use ValidatorConnectedEvent model for consistent structure
+                event = ValidatorConnectedEvent(
+                    validator_hotkey=validator.validator_hotkey,
+                    connection_id=validator.connection_id,
+                    connected_at=validator.last_connected_at
+                    or datetime.now(timezone.utc),
+                )
+                data = event.model_dump(mode="json")
                 validator_data.append(data)
 
             return validator_data
@@ -573,14 +595,15 @@ class RealtimeEventBroadcaster:
 
             job_data = []
             for job_status in job_statuses:
-                data = {
-                    "job_id": job_status.job_id,
-                    "validator_hotkey": job_status.validator_hotkey,
-                    "status": job_status.status.value,
-                    "detail": job_status.detail,
-                    "created_at": job_status.created_at.isoformat(),
-                }
-                job_data.append(data)
+                # Use JobStatusChangedEvent model
+                event = JobStatusChangedEvent(
+                    job_id=str(job_status.job_id),
+                    validator_hotkey=job_status.validator_hotkey,
+                    status=job_status.status.value,
+                    detail=job_status.detail,
+                    created_at=job_status.created_at,
+                )
+                job_data.append(event.model_dump(mode="json"))
 
             return job_data
 
@@ -626,11 +649,22 @@ class RealtimeEventBroadcaster:
 
             result_data = []
             for eval_result in results:
-                data = eval_result.model_dump()
-                # Convert datetime fields to ISO format
-                for field in ["created_at", "updated_at", "result_time"]:
-                    if field in data and data[field]:
-                        data[field] = data[field].isoformat()
+                # Use EvaluationCompletedEvent model
+                event = EvaluationCompletedEvent(
+                    job_id=str(eval_result.job_id),
+                    validator_hotkey=eval_result.validator_hotkey,
+                    miner_hotkey=eval_result.miner_hotkey,
+                    competition_id=eval_result.competition_id,
+                    benchmark_name=eval_result.benchmark_name or "",
+                    score=eval_result.score,
+                    success_rate=eval_result.success_rate,
+                    avg_reward=eval_result.avg_reward,
+                    total_episodes=eval_result.total_episodes,
+                    result_time=eval_result.result_time,
+                    created_at=eval_result.created_at or datetime.now(timezone.utc),
+                )
+                # Add extra fields from the database model
+                data = event.model_dump(mode="json")
                 result_data.append(data)
 
             return result_data
@@ -659,22 +693,21 @@ class RealtimeEventBroadcaster:
 
             competition_data = []
             for competition in competitions:
-                data = {
-                    "id": competition.id,
-                    "name": competition.name,
-                    "description": competition.description,
-                    "benchmarks": competition.benchmarks,
-                    "points": competition.points,
-                    "active": competition.active,
-                    "start_time": competition.start_time.isoformat()
-                    if competition.start_time
-                    else None,
-                    "end_time": competition.end_time.isoformat()
-                    if competition.end_time
-                    else None,
-                    "created_at": competition.created_at.isoformat(),
-                    "updated_at": competition.updated_at.isoformat(),
-                }
+                # Use CompetitionCreatedEvent model
+                event = CompetitionCreatedEvent(
+                    id=competition.id,
+                    name=competition.name,
+                    description=competition.description,
+                    benchmarks=competition.benchmarks,
+                    points=competition.points,
+                    active=competition.active,
+                    start_time=competition.start_time,
+                    end_time=competition.end_time,
+                    created_at=competition.created_at or datetime.now(timezone.utc),
+                    updated_at=competition.updated_at or datetime.now(timezone.utc),
+                )
+                # Add extra fields
+                data = event.model_dump(mode="json")
                 competition_data.append(data)
 
             return competition_data
@@ -713,14 +746,17 @@ class RealtimeEventBroadcaster:
 
             submission_data = []
             for submission in submissions:
-                data = {
-                    "id": submission.id,
-                    "competition_id": submission.competition_id,
-                    "miner_hotkey": submission.miner_hotkey,
-                    "hf_repo_id": submission.hf_repo_id,
-                    "block_number": submission.block_number,
-                    "created_at": submission.created_at.isoformat(),
-                }
+                # Use SubmissionReceivedEvent model
+                event = SubmissionReceivedEvent(
+                    submission_id=submission.id,
+                    competition_id=submission.competition_id,
+                    miner_hotkey=submission.miner_hotkey,
+                    hf_repo_id=submission.hf_repo_id,
+                    block_number=submission.block_number,
+                    created_at=submission.created_at or datetime.now(timezone.utc),
+                )
+                # Add extra fields
+                data = event.model_dump(mode="json")
                 submission_data.append(data)
 
             return submission_data
@@ -755,25 +791,23 @@ class RealtimeEventBroadcaster:
 
             episode_data = []
             for episode in episodes:
-                data = {
-                    "id": episode.id,
-                    "job_id": episode.job_id,
-                    "submission_id": episode.submission_id,
-                    "episode_id": episode.episode_id,
-                    "env_name": episode.env_name,
-                    "benchmark_name": episode.benchmark_name,
-                    "total_reward": episode.total_reward,
-                    "success": episode.success,
-                    "steps": episode.steps,
-                    "start_time": episode.start_time.isoformat()
-                    if episode.start_time
-                    else None,
-                    "end_time": episode.end_time.isoformat()
-                    if episode.end_time
-                    else None,
-                    "extra_metrics": episode.extra_metrics,
-                    "created_at": episode.created_at.isoformat(),
-                }
+                # Use EpisodeCompletedEvent model
+                event = EpisodeCompletedEvent(
+                    job_id=str(episode.job_id),
+                    submission_id=str(episode.submission_id),
+                    episode_id=episode.episode_id,
+                    env_name=episode.env_name,
+                    benchmark_name=episode.benchmark_name,
+                    total_reward=episode.total_reward,
+                    success=episode.success,
+                    steps=episode.steps,
+                    start_time=episode.start_time or datetime.now(timezone.utc),
+                    end_time=episode.end_time or datetime.now(timezone.utc),
+                    extra_metrics=episode.extra_metrics,
+                    created_at=episode.created_at or datetime.now(timezone.utc),
+                )
+                # Add extra fields
+                data = event.model_dump(mode="json")
                 episode_data.append(data)
 
             return episode_data

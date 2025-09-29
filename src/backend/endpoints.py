@@ -31,6 +31,13 @@ from backend.constants import (
     MAX_PAGE_LIMIT,
     MIN_PAGE_LIMIT,
 )
+from backend.events import (
+    EpisodeCompletedEvent,
+    EpisodeStepEvent,
+    EvaluationCompletedEvent,
+    ValidatorConnectedEvent,
+    ValidatorDisconnectedEvent,
+)
 from backend.realtime import event_broadcaster
 from backend.service import BackendService
 from core import __version__ as VERSION
@@ -1155,14 +1162,12 @@ async def validator_websocket(websocket: WebSocket):
         logger.info(f"Validator registered: {validator_hotkey} ({connection_id})")
 
         # Broadcast validator connected event
-        await event_broadcaster.broadcast_event(
-            EventType.VALIDATOR_CONNECTED,
-            {
-                "validator_hotkey": validator_hotkey,
-                "connection_id": connection_id,
-                "connected_at": datetime.now(timezone.utc).isoformat(),
-            },
+        event = ValidatorConnectedEvent(
+            validator_hotkey=validator_hotkey,
+            connection_id=connection_id,
+            connected_at=datetime.now(timezone.utc),
         )
+        await event_broadcaster.broadcast_event(EventType.VALIDATOR_CONNECTED, event)
 
         # Handle messages
         while True:
@@ -1267,24 +1272,23 @@ async def validator_websocket(websocket: WebSocket):
                             f"Stored result from {validator_hotkey} for job {result_msg.job_id}"
                         )
 
-                        # Broadcast evaluation completed event to clients using the model
-                        result_data = eval_result.model_dump()
-                        # Convert datetime to ISO format string
-                        if "created_at" in result_data and result_data["created_at"]:
-                            result_data["created_at"] = result_data[
-                                "created_at"
-                            ].isoformat()
-                        if "updated_at" in result_data and result_data["updated_at"]:
-                            result_data["updated_at"] = result_data[
-                                "updated_at"
-                            ].isoformat()
-                        if "result_time" in result_data and result_data["result_time"]:
-                            result_data["result_time"] = result_data[
-                                "result_time"
-                            ].isoformat()
-
+                        # Create evaluation completed event
+                        # Pydantic will automatically handle datetime to ISO conversion
+                        eval_event = EvaluationCompletedEvent(
+                            job_id=result.job_id,
+                            validator_hotkey=result.validator_hotkey,
+                            miner_hotkey=result.miner_hotkey,
+                            competition_id=result.competition_id,
+                            benchmark_name=result.benchmark_name,
+                            score=result.score,
+                            success_rate=result.success_rate,
+                            avg_reward=result.avg_reward,
+                            total_episodes=result.total_episodes,
+                            result_time=result.result_time,
+                            created_at=result.created_at,
+                        )
                         await event_broadcaster.broadcast_event(
-                            EventType.EVALUATION_COMPLETED, result_data
+                            EventType.EVALUATION_COMPLETED, eval_event
                         )
 
                         # Send acknowledgment
@@ -1332,16 +1336,25 @@ async def validator_websocket(websocket: WebSocket):
                     await session.commit()
 
                     # Broadcast episode completed event to clients using the model
-                    episode_data = episode_record.model_dump()
-                    # Convert datetime to ISO format string
-                    for field in ["created_at", "updated_at", "start_time", "end_time"]:
-                        if field in episode_data and episode_data[field]:
-                            episode_data[field] = episode_data[field].isoformat()
-                    # Add validator hotkey since it's relevant context
-                    episode_data["validator_hotkey"] = validator_hotkey
-
+                    episode_event = EpisodeCompletedEvent(
+                        job_id=episode_msg.job_id,
+                        submission_id=episode_msg.submission_id,
+                        episode_id=episode_msg.episode_id,
+                        env_name=episode_msg.env_name,
+                        benchmark_name=episode_msg.benchmark_name,
+                        total_reward=episode_msg.total_reward,
+                        success=episode_msg.success,
+                        steps=episode_msg.steps,
+                        start_time=episode_msg.start_time
+                        if isinstance(episode_msg.start_time, datetime)
+                        else datetime.fromisoformat(episode_msg.start_time),
+                        end_time=episode_msg.end_time
+                        if isinstance(episode_msg.end_time, datetime)
+                        else datetime.fromisoformat(episode_msg.end_time),
+                        extra_metrics=episode_msg.extra_metrics,
+                    )
                     await event_broadcaster.broadcast_event(
-                        EventType.EPISODE_COMPLETED, episode_data
+                        EventType.EPISODE_COMPLETED, episode_event
                     )
 
                     # Check if this is the first episode for this job-validator combination
@@ -1412,17 +1425,19 @@ async def validator_websocket(websocket: WebSocket):
                         await session.commit()
 
                         # Broadcast episode step event to clients
-                        step_data = step_record.model_dump()
-                        # Convert datetime to ISO format string
-                        for field in ["created_at", "updated_at", "timestamp"]:
-                            if field in step_data and step_data[field]:
-                                step_data[field] = step_data[field].isoformat()
-                        # Add validator hotkey and job_id for context
-                        step_data["validator_hotkey"] = validator_hotkey
-                        step_data["job_id"] = episode_record.job_id
-
+                        step_event = EpisodeStepEvent(
+                            submission_id=step_msg.submission_id,
+                            episode_id=step_msg.episode_id,
+                            step=step_msg.step,
+                            action=step_msg.action,
+                            reward=step_msg.reward,
+                            done=step_msg.done,
+                            truncated=step_msg.truncated,
+                            observation_refs=step_msg.observation_refs,
+                            info=step_msg.info,
+                        )
                         await event_broadcaster.broadcast_event(
-                            EventType.EPISODE_STEP, step_data
+                            EventType.EPISODE_STEP, step_event
                         )
 
                         logger.info(
@@ -1459,13 +1474,13 @@ async def validator_websocket(websocket: WebSocket):
                         await session.commit()
 
             # Broadcast validator disconnected event
+            disconnected_event = ValidatorDisconnectedEvent(
+                validator_hotkey=hotkey,
+                connection_id=connection_id,
+                disconnected_at=datetime.now(timezone.utc),
+            )
             await event_broadcaster.broadcast_event(
-                EventType.VALIDATOR_DISCONNECTED,
-                {
-                    "validator_hotkey": hotkey,
-                    "connection_id": connection_id,
-                    "disconnected_at": datetime.now(timezone.utc).isoformat(),
-                },
+                EventType.VALIDATOR_DISCONNECTED, disconnected_event
             )
 
 

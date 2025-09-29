@@ -188,6 +188,12 @@ def set_node_weights(
     wait_for_finalization: bool = False,
     max_attempts: int | None = None,  # NOTE: DEPRECATED
 ) -> bool:
+    """
+    Set node weights on the substrate chain.
+
+    NOTE: This function is copied from fiber and modified to fix memory leak issues
+    in the original implementation.
+    """
     if max_attempts is not None:
         logger.warning(
             "Parameter 'max_attempts' is deprecated and will be removed in version 2.2.0"
@@ -199,8 +205,6 @@ def set_node_weights(
     if not can_set_weights(substrate, netuid, validator_node_id):
         return False
 
-    # NOTE: Sadly this can't be an argument of the function, the hyperparam must be set on chain
-    # For it to function properly
     substrate, commit_reveal_enabled = query_substrate(
         substrate,
         "SubtensorModule",

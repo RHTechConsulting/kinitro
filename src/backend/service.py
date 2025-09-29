@@ -40,6 +40,11 @@ from backend.constants import (
     WEIGHT_BROADCAST_INTERVAL,
     WEIGHT_BROADCAST_STARTUP_DELAY,
 )
+from backend.events import (
+    JobCompletedEvent,
+    JobCreatedEvent,
+    JobStatusChangedEvent,
+)
 from backend.realtime import event_broadcaster
 from core.chain import query_commitments_from_substrate
 from core.db.models import EvaluationStatus
@@ -891,15 +896,20 @@ class BackendService:
                 logger.debug(f"Created evaluation job: {eval_job}")
 
                 # Broadcast job created event to clients
-                # Convert the model to dict for JSON serialization
-                job_data = eval_job.model_dump()
-                # Convert datetime to ISO format string
-                if "created_at" in job_data and job_data["created_at"]:
-                    job_data["created_at"] = job_data["created_at"].isoformat()
-                if "updated_at" in job_data and job_data["updated_at"]:
-                    job_data["updated_at"] = job_data["updated_at"].isoformat()
-
-                await event_broadcaster.broadcast_event(EventType.JOB_CREATED, job_data)
+                job_event = JobCreatedEvent(
+                    job_id=str(eval_job.id),
+                    validator_hotkey="",  # Will be set per validator
+                    competition_id=eval_job.competition_id,
+                    submission_id=eval_job.submission_id,
+                    miner_hotkey=eval_job.miner_hotkey,
+                    hf_repo_id=eval_job.hf_repo_id,
+                    env_provider=eval_job.env_provider,
+                    benchmark_name=eval_job.benchmark_name,
+                    config=eval_job.config if eval_job.config else {},
+                )
+                await event_broadcaster.broadcast_event(
+                    EventType.JOB_CREATED, job_event
+                )
 
                 # Broadcast to validators
                 await self._broadcast_job(eval_job)
@@ -936,21 +946,28 @@ class BackendService:
                 await session.commit()
 
                 # Broadcast status change event to clients using the model
-                status_data = status_record.model_dump()
-                # Convert datetime to ISO format string
-                if "created_at" in status_data and status_data["created_at"]:
-                    status_data["created_at"] = status_data["created_at"].isoformat()
-                if "updated_at" in status_data and status_data["updated_at"]:
-                    status_data["updated_at"] = status_data["updated_at"].isoformat()
-
+                status_event = JobStatusChangedEvent(
+                    job_id=str(job_id),
+                    validator_hotkey=validator_hotkey,
+                    status=status.value,
+                    detail=detail,
+                    created_at=status_record.created_at,
+                )
                 await event_broadcaster.broadcast_event(
-                    EventType.JOB_STATUS_CHANGED, status_data
+                    EventType.JOB_STATUS_CHANGED, status_event
                 )
 
                 # If job is completed, also send JOB_COMPLETED event
                 if status == EvaluationStatus.COMPLETED:
+                    completed_event = JobCompletedEvent(
+                        job_id=str(job_id),
+                        validator_hotkey=validator_hotkey,
+                        status=status.value,
+                        detail=detail,
+                        result_count=0,  # Will be updated when results come in
+                    )
                     await event_broadcaster.broadcast_event(
-                        EventType.JOB_COMPLETED, status_data
+                        EventType.JOB_COMPLETED, completed_event
                     )
 
                 logger.debug(
