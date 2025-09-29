@@ -31,6 +31,14 @@ from backend.constants import (
     MAX_PAGE_LIMIT,
     MIN_PAGE_LIMIT,
 )
+from backend.events import (
+    EpisodeCompletedEvent,
+    EpisodeStepEvent,
+    EvaluationCompletedEvent,
+    ValidatorConnectedEvent,
+    ValidatorDisconnectedEvent,
+)
+from backend.realtime import event_broadcaster
 from backend.service import BackendService
 from core import __version__ as VERSION
 from core.db.models import EvaluationStatus, SnowflakeId
@@ -39,6 +47,7 @@ from core.messages import (
     EpisodeDataMessage,
     EpisodeStepDataMessage,
     EvalResultMessage,
+    EventType,
     MessageType,
 )
 
@@ -86,10 +95,20 @@ async def lifespan(app: FastAPI):
     # Initialize the service but don't start background tasks yet
     await backend_service.startup()
 
+    # Set backend service reference in event broadcaster
+    event_broadcaster.set_backend_service(backend_service)
+
+    # Start the event broadcaster
+    await event_broadcaster.start()
+
     # Start background tasks after FastAPI is ready
     asyncio.create_task(backend_service.start_background_tasks())
 
     yield
+
+    # Stop the event broadcaster
+    await event_broadcaster.stop()
+
     await backend_service.shutdown()
 
 
@@ -1142,6 +1161,14 @@ async def validator_websocket(websocket: WebSocket):
 
         logger.info(f"Validator registered: {validator_hotkey} ({connection_id})")
 
+        # Broadcast validator connected event
+        event = ValidatorConnectedEvent(
+            validator_hotkey=validator_hotkey,
+            connection_id=connection_id,
+            connected_at=datetime.now(timezone.utc),
+        )
+        await event_broadcaster.broadcast_event(EventType.VALIDATOR_CONNECTED, event)
+
         # Handle messages
         while True:
             data = await websocket.receive_text()
@@ -1245,6 +1272,25 @@ async def validator_websocket(websocket: WebSocket):
                             f"Stored result from {validator_hotkey} for job {result_msg.job_id}"
                         )
 
+                        # Create evaluation completed event
+                        # Pydantic will automatically handle datetime to ISO conversion
+                        eval_event = EvaluationCompletedEvent(
+                            job_id=result.job_id,
+                            validator_hotkey=result.validator_hotkey,
+                            miner_hotkey=result.miner_hotkey,
+                            competition_id=result.competition_id,
+                            benchmark_name=result.benchmark_name,
+                            score=result.score,
+                            success_rate=result.success_rate,
+                            avg_reward=result.avg_reward,
+                            total_episodes=result.total_episodes,
+                            result_time=result.result_time,
+                            created_at=result.created_at,
+                        )
+                        await event_broadcaster.broadcast_event(
+                            EventType.EVALUATION_COMPLETED, eval_event
+                        )
+
                         # Send acknowledgment
                         await websocket.send_text(
                             json.dumps(
@@ -1288,6 +1334,28 @@ async def validator_websocket(websocket: WebSocket):
 
                     session.add(episode_record)
                     await session.commit()
+
+                    # Broadcast episode completed event to clients using the model
+                    episode_event = EpisodeCompletedEvent(
+                        job_id=episode_msg.job_id,
+                        submission_id=episode_msg.submission_id,
+                        episode_id=episode_msg.episode_id,
+                        env_name=episode_msg.env_name,
+                        benchmark_name=episode_msg.benchmark_name,
+                        total_reward=episode_msg.total_reward,
+                        success=episode_msg.success,
+                        steps=episode_msg.steps,
+                        start_time=episode_msg.start_time
+                        if isinstance(episode_msg.start_time, datetime)
+                        else datetime.fromisoformat(episode_msg.start_time),
+                        end_time=episode_msg.end_time
+                        if isinstance(episode_msg.end_time, datetime)
+                        else datetime.fromisoformat(episode_msg.end_time),
+                        extra_metrics=episode_msg.extra_metrics,
+                    )
+                    await event_broadcaster.broadcast_event(
+                        EventType.EPISODE_COMPLETED, episode_event
+                    )
 
                     # Check if this is the first episode for this job-validator combination
                     # If so, update status to RUNNING
@@ -1356,6 +1424,22 @@ async def validator_websocket(websocket: WebSocket):
                         session.add(step_record)
                         await session.commit()
 
+                        # Broadcast episode step event to clients
+                        step_event = EpisodeStepEvent(
+                            submission_id=step_msg.submission_id,
+                            episode_id=step_msg.episode_id,
+                            step=step_msg.step,
+                            action=step_msg.action,
+                            reward=step_msg.reward,
+                            done=step_msg.done,
+                            truncated=step_msg.truncated,
+                            observation_refs=step_msg.observation_refs,
+                            info=step_msg.info,
+                        )
+                        await event_broadcaster.broadcast_event(
+                            EventType.EPISODE_STEP, step_event
+                        )
+
                         logger.info(
                             f"Stored step data from {validator_hotkey} for episode {step_msg.episode_id}, step {step_msg.step}"
                         )
@@ -1388,3 +1472,57 @@ async def validator_websocket(websocket: WebSocket):
                     if validator_conn:
                         validator_conn.is_connected = False
                         await session.commit()
+
+            # Broadcast validator disconnected event
+            disconnected_event = ValidatorDisconnectedEvent(
+                validator_hotkey=hotkey,
+                connection_id=connection_id,
+                disconnected_at=datetime.now(timezone.utc),
+            )
+            await event_broadcaster.broadcast_event(
+                EventType.VALIDATOR_DISCONNECTED, disconnected_event
+            )
+
+
+# ============================================================================
+# WebSocket Endpoint for Frontend Clients
+# ============================================================================
+
+
+@app.websocket("/ws/client")
+async def client_websocket(websocket: WebSocket):
+    """WebSocket endpoint for frontend client connections (no auth required)."""
+    await websocket.accept()
+    # Generate a connection ID
+    connection_id = uuid.uuid4().hex
+
+    try:
+        # Add client to broadcaster
+        await event_broadcaster.add_client(connection_id, websocket)
+
+        # Send connection acknowledgment
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "message_type": MessageType.REGISTRATION_ACK,
+                    "status": "connected",
+                    "connection_id": connection_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+
+        logger.info(f"Client connected: {connection_id}")
+
+        # Handle messages
+        while True:
+            data = await websocket.receive_text()
+            await event_broadcaster.handle_client_message(connection_id, data)
+
+    except WebSocketDisconnect:
+        logger.info(f"Client disconnected: {connection_id}")
+    except Exception as e:
+        logger.error(f"Error in client WebSocket: {e}")
+    finally:
+        # Cleanup
+        await event_broadcaster.remove_client(connection_id)
