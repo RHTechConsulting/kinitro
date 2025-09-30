@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
+from core.db.models import EvaluationStatus
+
 
 class BaseEvent(BaseModel):
     """Base class for all event data models."""
@@ -22,11 +24,6 @@ class BaseEvent(BaseModel):
     )
 
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    @field_serializer("timestamp", when_used="json")
-    def serialize_timestamp(self, timestamp: datetime) -> str:
-        """Serialize timestamp to ISO format string."""
-        return timestamp.isoformat()
 
     @field_serializer("*", mode="wrap")
     def serialize_datetime_fields(self, value, serializer, info):
@@ -76,7 +73,7 @@ class JobStatusChangedEvent(JobEventMixin, BaseEvent):
     """Event data for JOB_STATUS_CHANGED event."""
 
     validator_hotkey: str
-    status: str
+    status: EvaluationStatus
     detail: Optional[str] = None
     created_at: datetime
 
@@ -85,7 +82,7 @@ class JobCompletedEvent(JobEventMixin, BaseEvent):
     """Event data for JOB_COMPLETED event."""
 
     validator_hotkey: str
-    status: str
+    status: EvaluationStatus
     detail: Optional[str] = None
     result_count: int = 0
 
