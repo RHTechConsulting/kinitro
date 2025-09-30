@@ -6,9 +6,9 @@ broadcast to frontend clients via WebSocket connections.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 
 class BaseEvent(BaseModel):
@@ -36,13 +36,35 @@ class BaseEvent(BaseModel):
         return serializer(value)
 
 
+class JobEventMixin(BaseModel):
+    """Mixin for events that include a job_id field."""
+
+    job_id: str
+
+    @field_validator("job_id", mode="before")
+    @classmethod
+    def convert_job_id_to_string(cls, v: Union[int, str]) -> str:
+        """Convert job_id to string if it's an integer."""
+        return str(v)
+
+
+class SubmissionEventMixin(BaseModel):
+    """Mixin for events that include a submission_id field."""
+
+    submission_id: str
+
+    @field_validator("submission_id", mode="before")
+    @classmethod
+    def convert_submission_id_to_string(cls, v: Union[int, str]) -> str:
+        """Convert submission_id to string if it's an integer."""
+        return str(v)
+
+
 # Job Events
-class JobCreatedEvent(BaseEvent):
+class JobCreatedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     """Event data for JOB_CREATED event."""
 
-    job_id: int
     competition_id: str
-    submission_id: int
     miner_hotkey: str
     hf_repo_id: str
     env_provider: str
@@ -50,20 +72,18 @@ class JobCreatedEvent(BaseEvent):
     config: Dict[str, Any]
 
 
-class JobStatusChangedEvent(BaseEvent):
+class JobStatusChangedEvent(JobEventMixin, BaseEvent):
     """Event data for JOB_STATUS_CHANGED event."""
 
-    job_id: int
     validator_hotkey: str
     status: str
     detail: Optional[str] = None
     created_at: datetime
 
 
-class JobCompletedEvent(BaseEvent):
+class JobCompletedEvent(JobEventMixin, BaseEvent):
     """Event data for JOB_COMPLETED event."""
 
-    job_id: int
     validator_hotkey: str
     status: str
     detail: Optional[str] = None
@@ -71,21 +91,18 @@ class JobCompletedEvent(BaseEvent):
 
 
 # Evaluation Events
-class EvaluationStartedEvent(BaseEvent):
+class EvaluationStartedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     """Event data for EVALUATION_STARTED event."""
 
-    job_id: int
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
-    submission_id: int
     benchmark_name: str
 
 
-class EvaluationProgressEvent(BaseEvent):
+class EvaluationProgressEvent(JobEventMixin, BaseEvent):
     """Event data for EVALUATION_PROGRESS event."""
 
-    job_id: int
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -95,10 +112,9 @@ class EvaluationProgressEvent(BaseEvent):
     success_rate: float
 
 
-class EvaluationCompletedEvent(BaseEvent):
+class EvaluationCompletedEvent(JobEventMixin, BaseEvent):
     """Event data for EVALUATION_COMPLETED event."""
 
-    job_id: int
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -112,20 +128,17 @@ class EvaluationCompletedEvent(BaseEvent):
 
 
 # Episode Events
-class EpisodeStartedEvent(BaseEvent):
+class EpisodeStartedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     """Event data for EPISODE_STARTED event."""
 
-    job_id: int
-    submission_id: int
     episode_id: int
     env_name: str
     benchmark_name: str
 
 
-class EpisodeStepEvent(BaseEvent):
+class EpisodeStepEvent(SubmissionEventMixin, BaseEvent):
     """Event data for EPISODE_STEP event."""
 
-    submission_id: int
     episode_id: int
     step: int
     action: Dict[str, Any]
@@ -136,11 +149,9 @@ class EpisodeStepEvent(BaseEvent):
     info: Optional[Dict[str, Any]] = None
 
 
-class EpisodeCompletedEvent(BaseEvent):
+class EpisodeCompletedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     """Event data for EPISODE_COMPLETED event."""
 
-    job_id: int
-    submission_id: int
     episode_id: int
     env_name: str
     benchmark_name: str
@@ -200,10 +211,9 @@ class CompetitionDeactivatedEvent(BaseEvent):
 
 
 # Submission Events
-class SubmissionReceivedEvent(BaseEvent):
+class SubmissionReceivedEvent(SubmissionEventMixin, BaseEvent):
     """Event data for SUBMISSION_RECEIVED event."""
 
-    submission_id: int
     competition_id: str
     miner_hotkey: str
     hf_repo_id: str
