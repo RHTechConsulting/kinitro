@@ -20,7 +20,7 @@ from fiber.chain.fetch_nodes import _get_nodes_for_uid
 from fiber.chain.interface import get_substrate
 from fiber.chain.models import Node
 from snowflake import SnowflakeGenerator
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -44,6 +44,9 @@ from backend.events import (
     JobCompletedEvent,
     JobCreatedEvent,
     JobStatusChangedEvent,
+    StatsUpdatedEvent,
+    SubmissionReceivedEvent,
+    ValidatorDisconnectedEvent,
 )
 from backend.realtime import event_broadcaster
 from core.chain import query_commitments_from_substrate
@@ -430,13 +433,16 @@ class BackendService:
                             )
                         )
 
-                        for validator in result.scalars():
+                        stale_validators = result.scalars().all()
+
+                        for validator in stale_validators:
                             logger.warning(
                                 f"Marking validator as disconnected: {validator.validator_hotkey}"
                             )
                             validator.is_connected = False
 
                             # Close WebSocket if exists
+                            conn_id_to_remove = None
                             for conn_id, hotkey in list(
                                 self.validator_connections.items()
                             ):
@@ -445,9 +451,26 @@ class BackendService:
                                         await self.active_connections[conn_id].close()
                                         del self.active_connections[conn_id]
                                     del self.validator_connections[conn_id]
+                                    conn_id_to_remove = conn_id
                                     break
 
+                            # Broadcast validator disconnected event
+                            if conn_id_to_remove:
+                                disconnected_event = ValidatorDisconnectedEvent(
+                                    validator_hotkey=validator.validator_hotkey,
+                                    connection_id=conn_id_to_remove,
+                                    disconnected_at=datetime.now(timezone.utc),
+                                    reason="Heartbeat timeout",
+                                )
+                                await event_broadcaster.broadcast_event(
+                                    EventType.VALIDATOR_DISCONNECTED, disconnected_event
+                                )
+
                         await session.commit()
+
+                        # Broadcast updated stats if any validators were disconnected
+                        if stale_validators:
+                            await self._broadcast_stats_update()
 
                 await asyncio.sleep(30)
 
@@ -835,6 +858,12 @@ class BackendService:
                 )
                 return
 
+            # log the submission info for miner
+            logger.debug(
+                f"Miner {commitment.hotkey} submitted version {commitment.data.v} "
+                f"for competition {competition_id} at block {block_num}"
+            )
+
             competition = active_competitions[competition_id]
 
             if not self.async_session:
@@ -869,6 +898,19 @@ class BackendService:
                 session.add(submission)
                 await session.flush()
 
+                # Broadcast submission received event
+                submission_event = SubmissionReceivedEvent(
+                    submission_id=submission.id,
+                    competition_id=submission.competition_id,
+                    miner_hotkey=submission.miner_hotkey,
+                    hf_repo_id=submission.hf_repo_id,
+                    block_number=block_num,
+                    created_at=submission.created_at or datetime.now(timezone.utc),
+                )
+                await event_broadcaster.broadcast_event(
+                    EventType.SUBMISSION_RECEIVED, submission_event
+                )
+
                 # Create job
                 job_id = next(self.id_generator)
                 for benchmark in competition.benchmarks:
@@ -898,7 +940,6 @@ class BackendService:
                 # Broadcast job created event to clients
                 job_event = JobCreatedEvent(
                     job_id=str(eval_job.id),
-                    validator_hotkey="",  # Will be set per validator
                     competition_id=eval_job.competition_id,
                     submission_id=eval_job.submission_id,
                     miner_hotkey=eval_job.miner_hotkey,
@@ -915,10 +956,149 @@ class BackendService:
                 await self._broadcast_job(eval_job)
                 logger.debug(f"Broadcasted job {job_id} to validators")
 
+                # Broadcast updated stats
+                await self._broadcast_stats_update()
+
                 logger.info(f"Processed commitment from {commitment.hotkey}")
 
         except Exception as e:
             logger.error(f"Failed to process commitment: {e}")
+
+    async def _broadcast_stats_update(self):
+        """Broadcast updated statistics to all clients."""
+        if not self.async_session:
+            return
+
+        try:
+            async with self.async_session() as session:
+                # Get competitions
+                comp_result = await session.execute(select(Competition))
+                competitions = comp_result.scalars().all()
+                active_comps = [c for c in competitions if c.active]
+                total_points = sum(c.points for c in active_comps)
+
+                # Get validators
+                val_result = await session.execute(
+                    select(ValidatorConnection).where(ValidatorConnection.is_connected)
+                )
+                connected_validators = len(val_result.scalars().all())
+
+                # Get submissions count
+                sub_result = await session.execute(
+                    select(func.count(MinerSubmission.id))
+                )
+                total_submissions = sub_result.scalar() or 0
+
+                # Get jobs count
+                job_result = await session.execute(
+                    select(func.count(BackendEvaluationJob.id))
+                )
+                total_jobs = job_result.scalar() or 0
+
+                # Get completed jobs count (latest status is COMPLETED)
+                latest_status_subquery = (
+                    select(
+                        BackendEvaluationJobStatus.job_id,
+                        func.max(BackendEvaluationJobStatus.created_at).label(
+                            "max_created_at"
+                        ),
+                    )
+                    .group_by(BackendEvaluationJobStatus.job_id)
+                    .subquery()
+                )
+
+                completed_jobs_result = await session.execute(
+                    select(func.count(BackendEvaluationJob.id.distinct()))
+                    .select_from(BackendEvaluationJob)
+                    .join(
+                        BackendEvaluationJobStatus,
+                        BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
+                    )
+                    .join(
+                        latest_status_subquery,
+                        and_(
+                            BackendEvaluationJobStatus.job_id
+                            == latest_status_subquery.c.job_id,
+                            BackendEvaluationJobStatus.created_at
+                            == latest_status_subquery.c.max_created_at,
+                        ),
+                    )
+                    .where(
+                        BackendEvaluationJobStatus.status == EvaluationStatus.COMPLETED
+                    )
+                )
+                completed_jobs = completed_jobs_result.scalar() or 0
+
+                # Get failed jobs count (latest status is FAILED, CANCELLED, or TIMEOUT)
+                failed_jobs_result = await session.execute(
+                    select(func.count(BackendEvaluationJob.id.distinct()))
+                    .select_from(BackendEvaluationJob)
+                    .join(
+                        BackendEvaluationJobStatus,
+                        BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
+                    )
+                    .join(
+                        latest_status_subquery,
+                        and_(
+                            BackendEvaluationJobStatus.job_id
+                            == latest_status_subquery.c.job_id,
+                            BackendEvaluationJobStatus.created_at
+                            == latest_status_subquery.c.max_created_at,
+                        ),
+                    )
+                    .where(
+                        BackendEvaluationJobStatus.status.in_(
+                            [
+                                EvaluationStatus.FAILED,
+                                EvaluationStatus.CANCELLED,
+                                EvaluationStatus.TIMEOUT,
+                            ]
+                        )
+                    )
+                )
+                failed_jobs = failed_jobs_result.scalar() or 0
+
+                # Get results count
+                result_count = await session.execute(
+                    select(func.count(BackendEvaluationResult.id))
+                )
+                total_results = result_count.scalar() or 0
+
+                # Get backend state
+                state_result = await session.execute(
+                    select(BackendState).where(BackendState.id == 1)
+                )
+                state = state_result.scalar_one_or_none()
+
+                # Calculate competition percentages
+                comp_percentages = {}
+                for comp in active_comps:
+                    percentage = (
+                        (comp.points / total_points * 100) if total_points > 0 else 0
+                    )
+                    comp_percentages[comp.id] = percentage
+
+                # Create and broadcast StatsUpdatedEvent
+                stats_event = StatsUpdatedEvent(
+                    total_competitions=len(competitions),
+                    active_competitions=len(active_comps),
+                    total_points=total_points,
+                    connected_validators=connected_validators,
+                    total_submissions=total_submissions,
+                    total_jobs=total_jobs,
+                    total_results=total_results,
+                    completed_jobs=completed_jobs,
+                    failed_jobs=failed_jobs,
+                    last_seen_block=state.last_seen_block if state else 0,
+                    competition_percentages=comp_percentages,
+                )
+
+                await event_broadcaster.broadcast_event(
+                    EventType.STATS_UPDATED, stats_event
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to broadcast stats update: {e}")
 
     async def _update_job_status(
         self,
@@ -957,8 +1137,13 @@ class BackendService:
                     EventType.JOB_STATUS_CHANGED, status_event
                 )
 
-                # If job is completed, also send JOB_COMPLETED event
-                if status == EvaluationStatus.COMPLETED:
+                # If job is completed or failed, also send JOB_COMPLETED event and stats update
+                if status in [
+                    EvaluationStatus.COMPLETED,
+                    EvaluationStatus.FAILED,
+                    EvaluationStatus.CANCELLED,
+                    EvaluationStatus.TIMEOUT,
+                ]:
                     completed_event = JobCompletedEvent(
                         job_id=str(job_id),
                         validator_hotkey=validator_hotkey,
@@ -969,6 +1154,9 @@ class BackendService:
                     await event_broadcaster.broadcast_event(
                         EventType.JOB_COMPLETED, completed_event
                     )
+
+                    # Broadcast updated stats
+                    await self._broadcast_stats_update()
 
                 logger.debug(
                     f"Updated job {job_id} status to {status.value} for validator {validator_hotkey}"

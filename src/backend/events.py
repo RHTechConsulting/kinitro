@@ -40,8 +40,7 @@ class BaseEvent(BaseModel):
 class JobCreatedEvent(BaseEvent):
     """Event data for JOB_CREATED event."""
 
-    job_id: str
-    validator_hotkey: str
+    job_id: int
     competition_id: str
     submission_id: int
     miner_hotkey: str
@@ -54,7 +53,7 @@ class JobCreatedEvent(BaseEvent):
 class JobStatusChangedEvent(BaseEvent):
     """Event data for JOB_STATUS_CHANGED event."""
 
-    job_id: str
+    job_id: int
     validator_hotkey: str
     status: str
     detail: Optional[str] = None
@@ -64,7 +63,7 @@ class JobStatusChangedEvent(BaseEvent):
 class JobCompletedEvent(BaseEvent):
     """Event data for JOB_COMPLETED event."""
 
-    job_id: str
+    job_id: int
     validator_hotkey: str
     status: str
     detail: Optional[str] = None
@@ -75,7 +74,7 @@ class JobCompletedEvent(BaseEvent):
 class EvaluationStartedEvent(BaseEvent):
     """Event data for EVALUATION_STARTED event."""
 
-    job_id: str
+    job_id: int
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -86,7 +85,7 @@ class EvaluationStartedEvent(BaseEvent):
 class EvaluationProgressEvent(BaseEvent):
     """Event data for EVALUATION_PROGRESS event."""
 
-    job_id: str
+    job_id: int
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -99,7 +98,7 @@ class EvaluationProgressEvent(BaseEvent):
 class EvaluationCompletedEvent(BaseEvent):
     """Event data for EVALUATION_COMPLETED event."""
 
-    job_id: str
+    job_id: int
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -116,8 +115,8 @@ class EvaluationCompletedEvent(BaseEvent):
 class EpisodeStartedEvent(BaseEvent):
     """Event data for EPISODE_STARTED event."""
 
-    job_id: str
-    submission_id: str
+    job_id: int
+    submission_id: int
     episode_id: int
     env_name: str
     benchmark_name: str
@@ -126,7 +125,7 @@ class EpisodeStartedEvent(BaseEvent):
 class EpisodeStepEvent(BaseEvent):
     """Event data for EPISODE_STEP event."""
 
-    submission_id: str
+    submission_id: int
     episode_id: int
     step: int
     action: Dict[str, Any]
@@ -140,8 +139,8 @@ class EpisodeStepEvent(BaseEvent):
 class EpisodeCompletedEvent(BaseEvent):
     """Event data for EPISODE_COMPLETED event."""
 
-    job_id: str
-    submission_id: str
+    job_id: int
+    submission_id: int
     episode_id: int
     env_name: str
     benchmark_name: str
@@ -241,5 +240,7 @@ class StatsUpdatedEvent(BaseEvent):
     total_submissions: int
     total_jobs: int
     total_results: int
+    completed_jobs: int
+    failed_jobs: int
     last_seen_block: int
     competition_percentages: Dict[str, float]

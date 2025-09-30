@@ -1169,6 +1169,9 @@ async def validator_websocket(websocket: WebSocket):
         )
         await event_broadcaster.broadcast_event(EventType.VALIDATOR_CONNECTED, event)
 
+        # Broadcast updated stats (validator count changed)
+        await backend_service._broadcast_stats_update()
+
         # Handle messages
         while True:
             data = await websocket.receive_text()
@@ -1352,6 +1355,7 @@ async def validator_websocket(websocket: WebSocket):
                         if isinstance(episode_msg.end_time, datetime)
                         else datetime.fromisoformat(episode_msg.end_time),
                         extra_metrics=episode_msg.extra_metrics,
+                        created_at=datetime.now(timezone.utc),
                     )
                     await event_broadcaster.broadcast_event(
                         EventType.EPISODE_COMPLETED, episode_event
@@ -1482,6 +1486,9 @@ async def validator_websocket(websocket: WebSocket):
             await event_broadcaster.broadcast_event(
                 EventType.VALIDATOR_DISCONNECTED, disconnected_event
             )
+
+            # Broadcast updated stats (validator count changed)
+            await backend_service._broadcast_stats_update()
 
 
 # ============================================================================
