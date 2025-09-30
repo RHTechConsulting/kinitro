@@ -23,7 +23,6 @@ from backend.events import (
     EvaluationCompletedEvent,
     JobCompletedEvent,
     JobCreatedEvent,
-    JobStatusChangedEvent,
     StatsUpdatedEvent,
     SubmissionReceivedEvent,
     ValidatorConnectedEvent,
@@ -414,8 +413,6 @@ class RealtimeEventBroadcaster:
             # Job-related events
             elif event_type == EventType.JOB_CREATED:
                 return await self._get_initial_job_created_data(session, filters)
-            elif event_type == EventType.JOB_STATUS_CHANGED:
-                return await self._get_initial_job_status_data(session, filters)
             elif event_type == EventType.JOB_COMPLETED:
                 return await self._get_initial_job_completed_data(session, filters)
 
@@ -450,6 +447,7 @@ class RealtimeEventBroadcaster:
 
             # Skip these events - either not suitable for initial data or too granular
             elif event_type in [
+                EventType.JOB_STATUS_CHANGED,
                 EventType.VALIDATOR_DISCONNECTED,
                 EventType.EPISODE_STEP,
             ]:
@@ -719,50 +717,6 @@ class RealtimeEventBroadcaster:
 
         except Exception as e:
             logger.error(f"Error getting initial job created data: {str(e)}")
-            return []
-
-    async def _get_initial_job_status_data(
-        self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
-    ) -> List[Dict[str, Any]]:
-        """Get recent job status changes (for JOB_STATUS_CHANGED subscriptions)."""
-        try:
-            query = select(BackendEvaluationJobStatus)
-
-            # Apply filters if any
-            if filters:
-                for filter_key, filter_value in filters.items():
-                    if filter_key == "job_id":
-                        query = query.where(
-                            BackendEvaluationJobStatus.job_id == filter_value
-                        )
-                    elif filter_key == "validator_hotkey":
-                        query = query.where(
-                            BackendEvaluationJobStatus.validator_hotkey == filter_value
-                        )
-
-            query = query.order_by(BackendEvaluationJobStatus.created_at.desc()).limit(
-                limit
-            )
-
-            result = await session.execute(query)
-            job_statuses = result.scalars().all()
-
-            job_data = []
-            for job_status in job_statuses:
-                # Use JobStatusChangedEvent model
-                event = JobStatusChangedEvent(
-                    job_id=str(job_status.job_id),
-                    validator_hotkey=job_status.validator_hotkey,
-                    status=job_status.status.value,
-                    detail=job_status.detail,
-                    created_at=job_status.created_at,
-                )
-                job_data.append(event.model_dump(mode="json"))
-
-            return job_data
-
-        except Exception as e:
-            logger.error(f"Error getting initial job status data: {str(e)}")
             return []
 
     async def _get_initial_job_completed_data(
