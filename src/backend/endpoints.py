@@ -1278,17 +1278,17 @@ async def validator_websocket(websocket: WebSocket):
                         # Create evaluation completed event
                         # Pydantic will automatically handle datetime to ISO conversion
                         eval_event = EvaluationCompletedEvent(
-                            job_id=result.job_id,
-                            validator_hotkey=result.validator_hotkey,
-                            miner_hotkey=result.miner_hotkey,
-                            competition_id=result.competition_id,
-                            benchmark_name=result.benchmark_name,
-                            score=result.score,
-                            success_rate=result.success_rate,
-                            avg_reward=result.avg_reward,
-                            total_episodes=result.total_episodes,
-                            result_time=result.result_time,
-                            created_at=result.created_at,
+                            job_id=eval_result.job_id,
+                            validator_hotkey=eval_result.validator_hotkey,
+                            miner_hotkey=eval_result.miner_hotkey,
+                            competition_id=eval_result.competition_id,
+                            benchmark_name=eval_result.benchmark,
+                            score=eval_result.score,
+                            success_rate=eval_result.success_rate,
+                            avg_reward=eval_result.avg_reward,
+                            total_episodes=eval_result.total_episodes,
+                            result_time=eval_result.result_time,
+                            created_at=eval_result.created_at,
                         )
                         await event_broadcaster.broadcast_event(
                             EventType.EVALUATION_COMPLETED, eval_event
