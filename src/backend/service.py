@@ -947,6 +947,7 @@ class BackendService:
                     env_provider=eval_job.env_provider,
                     benchmark_name=eval_job.benchmark_name,
                     config=eval_job.config if eval_job.config else {},
+                    status=EvaluationStatus.QUEUED,
                 )
                 await event_broadcaster.broadcast_event(
                     EventType.JOB_CREATED, job_event

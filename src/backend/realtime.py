@@ -654,7 +654,10 @@ class RealtimeEventBroadcaster:
 
             # Join to get jobs with active statuses
             query = (
-                select(BackendEvaluationJob)
+                select(
+                    BackendEvaluationJob,
+                    BackendEvaluationJobStatus.status.label("current_status"),
+                )
                 .join(
                     BackendEvaluationJobStatus,
                     BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
@@ -696,10 +699,21 @@ class RealtimeEventBroadcaster:
             query = query.order_by(BackendEvaluationJob.created_at.desc()).limit(limit)
 
             result = await session.execute(query)
-            jobs = result.scalars().all()
+            job_rows = result.all()
 
             job_data = []
-            for job in jobs:
+            seen_job_ids = set()
+            for job, status in job_rows:
+                if job.id in seen_job_ids:
+                    continue
+                seen_job_ids.add(job.id)
+                current_status = (
+                    status
+                    if isinstance(status, EvaluationStatus) or status is None
+                    else EvaluationStatus(status)
+                )
+                if current_status is None:
+                    current_status = EvaluationStatus.QUEUED
                 # Use JobCreatedEvent model to match the event structure
                 event = JobCreatedEvent(
                     job_id=job.id,
@@ -710,8 +724,11 @@ class RealtimeEventBroadcaster:
                     env_provider=job.env_provider,
                     benchmark_name=job.benchmark_name,
                     config=job.config if job.config else {},
+                    status=current_status,
                 )
                 job_data.append(event.model_dump(mode="json"))
+                if len(job_data) >= limit:
+                    break
 
             return job_data
 

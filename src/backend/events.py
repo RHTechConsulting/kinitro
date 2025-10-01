@@ -67,6 +67,7 @@ class JobCreatedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     env_provider: str
     benchmark_name: str
     config: Dict[str, Any]
+    status: EvaluationStatus
 
 
 class JobStatusChangedEvent(JobEventMixin, BaseEvent):
