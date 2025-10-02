@@ -510,6 +510,10 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
         )
     )
     submission_id: str = Field(max_length=128, nullable=False, index=True)
+    validator_hotkey: Optional[SS58Address] = Field(
+        default=None,
+        sa_column=Column(SAString(48), nullable=True),
+    )
 
     # Episode metadata
     task_id: str = Field(max_length=128, nullable=False, index=True)
@@ -546,6 +550,7 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
         Index("ix_episode_data_episode", "episode_id"),
         Index("ix_episode_data_success", "success"),
         Index("ix_episode_data_submission_task", "submission_id", "task_id"),
+        Index("ix_episode_data_validator", "validator_hotkey"),
     )
 
 
@@ -566,6 +571,10 @@ class EpisodeStepData(TimestampMixin, SQLModel, table=True):
         )
     )
     submission_id: str = Field(max_length=128, nullable=False, index=True)
+    validator_hotkey: Optional[SS58Address] = Field(
+        default=None,
+        sa_column=Column(SAString(48), nullable=True),
+    )
 
     # Step metadata
     task_id: str = Field(max_length=128, nullable=False, index=True)
@@ -601,6 +610,7 @@ class EpisodeStepData(TimestampMixin, SQLModel, table=True):
         Index("ix_episode_step_submission", "submission_id"),
         Index("ix_episode_step_task", "task_id"),
         Index("ix_episode_step_step", "step"),
+        Index("ix_episode_step_validator", "validator_hotkey"),
         UniqueConstraint(
             "episode_id", "step", name="uq_episode_step"
         ),  # Ensure unique steps per episode

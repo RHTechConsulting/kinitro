@@ -77,6 +77,8 @@ class EpisodeResult:
     info: Dict[str, Any] = field(default_factory=dict)
 
 
+# TODO: add task name from i.e. task_spec to the EnvResult?
+# this would be useful for identifying which task within a multi-task benchmark/env
 @dataclass
 class EnvResult:
     """Aggregated results from all episodes of an environment in a benchmark."""

@@ -694,6 +694,7 @@ class EpisodeDataResponse(BaseModel):
     id: int
     job_id: int
     submission_id: str
+    validator_hotkey: Optional[str]
     episode_id: int
     env_name: str
     benchmark_name: str
@@ -716,6 +717,7 @@ class EpisodeStepDataResponse(BaseModel):
     id: int
     episode_id: int
     submission_id: str
+    validator_hotkey: Optional[str]
     step: int
     action: dict
     reward: float
@@ -735,6 +737,9 @@ class EpisodeStepDataResponse(BaseModel):
 async def get_episodes(
     job_id: Optional[int] = Query(None, description="Filter by job ID"),
     submission_id: Optional[str] = Query(None, description="Filter by submission ID"),
+    validator_hotkey: Optional[str] = Query(
+        None, description="Filter by validator hotkey"
+    ),
     success: Optional[bool] = Query(None, description="Filter by success status"),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
@@ -754,6 +759,8 @@ async def get_episodes(
             query = query.where(EpisodeData.job_id == job_id)
         if submission_id is not None:
             query = query.where(EpisodeData.submission_id == submission_id)
+        if validator_hotkey is not None:
+            query = query.where(EpisodeData.validator_hotkey == validator_hotkey)
         if success is not None:
             query = query.where(EpisodeData.success == success)
 
@@ -832,6 +839,9 @@ async def get_episode_steps(
 @app.get("/steps", response_model=List[EpisodeStepDataResponse])
 async def get_steps(
     submission_id: Optional[str] = Query(None, description="Filter by submission ID"),
+    validator_hotkey: Optional[str] = Query(
+        None, description="Filter by validator hotkey"
+    ),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -848,6 +858,8 @@ async def get_steps(
         # Apply filters
         if submission_id is not None:
             query = query.where(EpisodeStepData.submission_id == submission_id)
+        if validator_hotkey is not None:
+            query = query.where(EpisodeStepData.validator_hotkey == validator_hotkey)
 
         # Apply pagination
         query = query.limit(limit).offset(offset).order_by(EpisodeStepData.step)
@@ -1319,6 +1331,7 @@ async def validator_websocket(websocket: WebSocket):
                         id=next(backend_service.id_generator),
                         job_id=episode_msg.job_id,
                         submission_id=episode_msg.submission_id,
+                        validator_hotkey=validator_hotkey,
                         task_id=episode_msg.task_id,
                         episode_id=episode_msg.episode_id,
                         env_name=episode_msg.env_name,
@@ -1342,6 +1355,7 @@ async def validator_websocket(websocket: WebSocket):
                     episode_event = EpisodeCompletedEvent(
                         job_id=episode_msg.job_id,
                         submission_id=episode_msg.submission_id,
+                        validator_hotkey=validator_hotkey,
                         episode_id=episode_msg.episode_id,
                         env_name=episode_msg.env_name,
                         benchmark_name=episode_msg.benchmark_name,
@@ -1412,6 +1426,7 @@ async def validator_websocket(websocket: WebSocket):
                             id=next(backend_service.id_generator),
                             episode_id=episode_record.id,  # Use the database episode ID
                             submission_id=step_msg.submission_id,
+                            validator_hotkey=validator_hotkey,
                             task_id=step_msg.task_id,
                             step=step_msg.step,
                             action=step_msg.action,
@@ -1431,6 +1446,7 @@ async def validator_websocket(websocket: WebSocket):
                         # Broadcast episode step event to clients
                         step_event = EpisodeStepEvent(
                             submission_id=step_msg.submission_id,
+                            validator_hotkey=validator_hotkey,
                             episode_id=step_msg.episode_id,
                             step=step_msg.step,
                             action=step_msg.action,

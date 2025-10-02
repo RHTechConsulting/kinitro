@@ -1052,6 +1052,10 @@ class RealtimeEventBroadcaster:
                         query = query.where(EpisodeData.submission_id == filter_value)
                     elif filter_key == "episode_id":
                         query = query.where(EpisodeData.episode_id == filter_value)
+                    elif filter_key == "validator_hotkey":
+                        query = query.where(
+                            EpisodeData.validator_hotkey == filter_value
+                        )
 
             query = query.order_by(EpisodeData.created_at.desc()).limit(limit)
 
@@ -1064,6 +1068,7 @@ class RealtimeEventBroadcaster:
                 event = EpisodeCompletedEvent(
                     job_id=str(episode.job_id),
                     submission_id=str(episode.submission_id),
+                    validator_hotkey=episode.validator_hotkey,
                     episode_id=episode.episode_id,
                     env_name=episode.env_name,
                     benchmark_name=episode.benchmark_name,

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
+from backend.models import SS58Address
 from core.db.models import EvaluationStatus
 
 
@@ -146,6 +147,7 @@ class EpisodeStepEvent(SubmissionEventMixin, BaseEvent):
     truncated: bool
     observation_refs: Dict[str, Any]
     info: Optional[Dict[str, Any]] = None
+    validator_hotkey: Optional[SS58Address] = None
 
 
 class EpisodeCompletedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
@@ -161,6 +163,7 @@ class EpisodeCompletedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     end_time: datetime
     extra_metrics: Optional[Dict[str, Any]] = None
     created_at: datetime
+    validator_hotkey: Optional[SS58Address] = None
 
 
 # Competition Events
