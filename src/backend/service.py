@@ -938,6 +938,10 @@ class BackendService:
                 logger.debug(f"Created evaluation job: {eval_job}")
 
                 # Broadcast job created event to clients
+                connected_validator_hotkeys = tuple(
+                    dict.fromkeys(self.validator_connections.values())
+                )
+
                 job_event = JobCreatedEvent(
                     job_id=str(eval_job.id),
                     competition_id=eval_job.competition_id,
@@ -948,6 +952,10 @@ class BackendService:
                     benchmark_name=eval_job.benchmark_name,
                     config=eval_job.config if eval_job.config else {},
                     status=EvaluationStatus.QUEUED,
+                    validator_statuses={
+                        hotkey: EvaluationStatus.QUEUED
+                        for hotkey in connected_validator_hotkeys
+                    },
                 )
                 await event_broadcaster.broadcast_event(
                     EventType.JOB_CREATED, job_event

@@ -68,6 +68,7 @@ class JobCreatedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     benchmark_name: str
     config: Dict[str, Any]
     status: EvaluationStatus
+    validator_statuses: Dict[str, EvaluationStatus] = Field(default_factory=dict)
 
 
 class JobStatusChangedEvent(JobEventMixin, BaseEvent):

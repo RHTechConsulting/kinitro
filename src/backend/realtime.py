@@ -701,12 +701,77 @@ class RealtimeEventBroadcaster:
             result = await session.execute(query)
             job_rows = result.all()
 
-            job_data = []
+            unique_jobs = []
             seen_job_ids = set()
             for job, status in job_rows:
                 if job.id in seen_job_ids:
                     continue
                 seen_job_ids.add(job.id)
+                unique_jobs.append((job, status))
+                if len(unique_jobs) >= limit:
+                    break
+
+            job_ids = [job.id for job, _ in unique_jobs]
+
+            validator_statuses_map: Dict[int, Dict[str, EvaluationStatus]] = {}
+            if job_ids:
+                latest_per_validator = (
+                    select(
+                        BackendEvaluationJobStatus.job_id,
+                        BackendEvaluationJobStatus.validator_hotkey,
+                        func.max(BackendEvaluationJobStatus.created_at).label(
+                            "max_created_at"
+                        ),
+                    )
+                    .where(BackendEvaluationJobStatus.job_id.in_(job_ids))
+                    .group_by(
+                        BackendEvaluationJobStatus.job_id,
+                        BackendEvaluationJobStatus.validator_hotkey,
+                    )
+                    .subquery()
+                )
+
+                status_query = (
+                    select(
+                        BackendEvaluationJobStatus.job_id,
+                        BackendEvaluationJobStatus.validator_hotkey,
+                        BackendEvaluationJobStatus.status,
+                    )
+                    .join(
+                        latest_per_validator,
+                        and_(
+                            BackendEvaluationJobStatus.job_id
+                            == latest_per_validator.c.job_id,
+                            BackendEvaluationJobStatus.validator_hotkey
+                            == latest_per_validator.c.validator_hotkey,
+                            BackendEvaluationJobStatus.created_at
+                            == latest_per_validator.c.max_created_at,
+                        ),
+                    )
+                    .where(
+                        BackendEvaluationJobStatus.status.in_(
+                            [
+                                EvaluationStatus.QUEUED,
+                                EvaluationStatus.STARTING,
+                                EvaluationStatus.RUNNING,
+                            ]
+                        )
+                    )
+                )
+
+                status_rows = await session.execute(status_query)
+                for job_id, validator_hotkey, val_status in status_rows:
+                    status_enum = (
+                        val_status
+                        if isinstance(val_status, EvaluationStatus)
+                        else EvaluationStatus(val_status)
+                    )
+                    validator_statuses_map.setdefault(job_id, {})[validator_hotkey] = (
+                        status_enum
+                    )
+
+            job_data = []
+            for job, status in unique_jobs:
                 current_status = (
                     status
                     if isinstance(status, EvaluationStatus) or status is None
@@ -714,7 +779,7 @@ class RealtimeEventBroadcaster:
                 )
                 if current_status is None:
                     current_status = EvaluationStatus.QUEUED
-                # Use JobCreatedEvent model to match the event structure
+
                 event = JobCreatedEvent(
                     job_id=job.id,
                     competition_id=job.competition_id,
@@ -725,10 +790,9 @@ class RealtimeEventBroadcaster:
                     benchmark_name=job.benchmark_name,
                     config=job.config if job.config else {},
                     status=current_status,
+                    validator_statuses=validator_statuses_map.get(job.id, {}),
                 )
                 job_data.append(event.model_dump(mode="json"))
-                if len(job_data) >= limit:
-                    break
 
             return job_data
 
