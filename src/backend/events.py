@@ -58,6 +58,18 @@ class SubmissionEventMixin(BaseModel):
         return str(v)
 
 
+class EpisodeEventMixin(BaseModel):
+    """Mixin for events that include an episode_id field."""
+
+    episode_id: str
+
+    @field_validator("episode_id", mode="before")
+    @classmethod
+    def convert_episode_id_to_string(cls, v: Union[int, str]) -> str:
+        """Convert episode_id to string if it's an integer."""
+        return str(v)
+
+
 # Job Events
 class JobCreatedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     """Event data for JOB_CREATED event."""
@@ -128,18 +140,18 @@ class EvaluationCompletedEvent(JobEventMixin, BaseEvent):
 
 
 # Episode Events
-class EpisodeStartedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
+class EpisodeStartedEvent(
+    JobEventMixin, SubmissionEventMixin, EpisodeEventMixin, BaseEvent
+):
     """Event data for EPISODE_STARTED event."""
 
-    episode_id: int
     env_name: str
     benchmark_name: str
 
 
-class EpisodeStepEvent(SubmissionEventMixin, BaseEvent):
+class EpisodeStepEvent(SubmissionEventMixin, EpisodeEventMixin, BaseEvent):
     """Event data for EPISODE_STEP event."""
 
-    episode_id: int
     step: int
     action: Dict[str, Any]
     reward: float
@@ -150,13 +162,14 @@ class EpisodeStepEvent(SubmissionEventMixin, BaseEvent):
     validator_hotkey: Optional[SS58Address] = None
 
 
-class EpisodeCompletedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
+class EpisodeCompletedEvent(
+    JobEventMixin, SubmissionEventMixin, EpisodeEventMixin, BaseEvent
+):
     """Event data for EPISODE_COMPLETED event."""
 
-    episode_id: int
     env_name: str
     benchmark_name: str
-    total_reward: float
+    final_reward: float
     success: bool
     steps: int
     start_time: datetime

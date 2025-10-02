@@ -1072,7 +1072,7 @@ class RealtimeEventBroadcaster:
                     episode_id=episode.episode_id,
                     env_name=episode.env_name,
                     benchmark_name=episode.benchmark_name,
-                    total_reward=episode.total_reward,
+                    final_reward=episode.final_reward,
                     success=episode.success,
                     steps=episode.steps,
                     start_time=episode.start_time or datetime.now(timezone.utc),

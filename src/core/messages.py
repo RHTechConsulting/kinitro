@@ -178,7 +178,7 @@ class EpisodeDataMessage(SQLModel):
     episode_id: int
     env_name: str
     benchmark_name: str
-    total_reward: float
+    final_reward: float
     success: bool
     steps: int
     start_time: datetime

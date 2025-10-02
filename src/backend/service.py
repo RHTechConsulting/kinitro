@@ -401,7 +401,7 @@ class BackendService:
                                 await event_broadcaster.broadcast_event(
                                     EventType.JOB_STATUS_CHANGED,
                                     {
-                                        "job_id": job.id,
+                                        "job_id": str(job.id),
                                         "status": "TIMEOUT",
                                         "detail": "Job marked as timeout due to inactivity",
                                     },

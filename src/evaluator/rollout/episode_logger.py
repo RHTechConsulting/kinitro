@@ -206,14 +206,14 @@ class EpisodeLogger:
 
     async def end_episode(
         self,
-        total_reward: float,
+        final_reward: float,
         success: bool,
         extra_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
         """End the current episode and save data.
 
         Args:
-            total_reward: Total reward for the episode
+            final_reward: Final reward for the episode
             success: Whether the episode was successful
             extra_metrics: Additional metrics to store
         """
@@ -232,7 +232,7 @@ class EpisodeLogger:
                 "episode_id": self._current_episode_id,
                 "env_name": self.env_name,
                 "benchmark_name": self.benchmark_name,
-                "total_reward": total_reward,
+                "final_reward": final_reward,
                 "success": success,
                 "steps": len(self._current_episode_steps),
                 "start_time": self._current_episode_start,

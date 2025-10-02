@@ -15,7 +15,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 
 from backend.auth import (
@@ -691,14 +691,14 @@ async def get_result(result_id: int):
 class EpisodeDataResponse(BaseModel):
     """Response model for episode data."""
 
-    id: int
-    job_id: int
+    id: str
+    job_id: str
     submission_id: str
     validator_hotkey: Optional[str]
-    episode_id: int
+    episode_id: str
     env_name: str
     benchmark_name: str
-    total_reward: float
+    final_reward: float
     success: bool
     steps: int
     start_time: datetime
@@ -710,12 +710,17 @@ class EpisodeDataResponse(BaseModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", "job_id", "episode_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
+
 
 class EpisodeStepDataResponse(BaseModel):
     """Response model for episode step data."""
 
-    id: int
-    episode_id: int
+    id: str
+    episode_id: str
     submission_id: str
     validator_hotkey: Optional[str]
     step: int
@@ -731,6 +736,11 @@ class EpisodeStepDataResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @field_validator("id", "episode_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
 
 
 @app.get("/episodes", response_model=List[EpisodeDataResponse])
@@ -1311,7 +1321,7 @@ async def validator_websocket(websocket: WebSocket):
                             json.dumps(
                                 {
                                     "message_type": MessageType.RESULT_ACK,
-                                    "job_id": result_msg.job_id,
+                                    "job_id": str(result_msg.job_id),
                                     "status": "received",
                                 }
                             )
@@ -1336,7 +1346,7 @@ async def validator_websocket(websocket: WebSocket):
                         episode_id=episode_msg.episode_id,
                         env_name=episode_msg.env_name,
                         benchmark_name=episode_msg.benchmark_name,
-                        total_reward=episode_msg.total_reward,
+                        final_reward=episode_msg.final_reward,
                         success=episode_msg.success,
                         steps=episode_msg.steps,
                         start_time=datetime.fromisoformat(episode_msg.start_time)
@@ -1359,7 +1369,7 @@ async def validator_websocket(websocket: WebSocket):
                         episode_id=episode_msg.episode_id,
                         env_name=episode_msg.env_name,
                         benchmark_name=episode_msg.benchmark_name,
-                        total_reward=episode_msg.total_reward,
+                        final_reward=episode_msg.final_reward,
                         success=episode_msg.success,
                         steps=episode_msg.steps,
                         start_time=episode_msg.start_time

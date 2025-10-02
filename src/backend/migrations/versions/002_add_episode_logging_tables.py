@@ -28,7 +28,7 @@ def upgrade() -> None:
         sa.Column("episode_id", sa.Integer(), nullable=False),
         sa.Column("env_name", sa.String(length=128), nullable=False),
         sa.Column("benchmark_name", sa.String(length=128), nullable=False),
-        sa.Column("total_reward", sa.Float(), nullable=False),
+        sa.Column("final_reward", sa.Float(), nullable=False),
         sa.Column("success", sa.Boolean(), nullable=False),
         sa.Column("steps", sa.Integer(), nullable=False),
         sa.Column("start_time", sa.DateTime(timezone=True), nullable=False),

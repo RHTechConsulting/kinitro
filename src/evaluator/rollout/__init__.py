@@ -358,7 +358,7 @@ class RolloutWorker:
 
         done = False
         step_count = 0
-        total_reward = 0.0
+        final_reward = 0.0
         episode_steps = []
         episode_start = time.time()
 
@@ -413,7 +413,11 @@ class RolloutWorker:
                     observation, reward, done, info = step_result
                     done = bool(done)
 
-                total_reward += float(reward)
+                # Treat success signal as terminal even if env doesn't flag done
+                if info and info.get("success"):
+                    done = True
+
+                final_reward = float(reward)
                 step_count += 1
 
                 # Only keep minimal step info to reduce memory usage
@@ -472,11 +476,11 @@ class RolloutWorker:
 
                 if step_count % LOGGING_INTERVAL == 0:
                     logger.info(
-                        "Episode %d progress: %d/%d steps, total_reward=%.3f",
+                        "Episode %d progress: %d/%d steps, latest_reward=%.3f",
                         episode_id,
                         step_count,
                         max_steps,
-                        total_reward,
+                        final_reward,
                     )
 
             except Exception:
@@ -492,7 +496,7 @@ class RolloutWorker:
         episode_result = EpisodeResult(
             episode_id=episode_id,
             env_spec=env_spec,
-            reward=total_reward,
+            reward=final_reward,
             steps=step_count,
             success=success,
             info={"duration": episode_duration},  # Removed episode_steps to save memory
@@ -506,7 +510,7 @@ class RolloutWorker:
         # End episode logging if logger is available
         if episode_logger:
             await episode_logger.end_episode(
-                total_reward=total_reward,
+                final_reward=final_reward,
                 success=success,
                 extra_metrics={"duration": episode_duration, "final_info": info},
             )
@@ -515,7 +519,7 @@ class RolloutWorker:
             "Episode %d completed: steps=%d reward=%.2f success=%s",
             episode_id,
             step_count,
-            total_reward,
+            final_reward,
             episode_result.success,
         )
         return episode_result
