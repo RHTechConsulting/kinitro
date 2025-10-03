@@ -47,6 +47,7 @@ from core.messages import (
     EpisodeDataMessage,
     EpisodeStepDataMessage,
     EvalResultMessage,
+    JobStatusUpdateMessage,
     EventType,
     MessageType,
 )
@@ -1326,6 +1327,32 @@ async def validator_websocket(websocket: WebSocket):
                                 }
                             )
                         )
+
+            elif message_type == MessageType.JOB_STATUS_UPDATE:
+                status_msg = JobStatusUpdateMessage(**message)
+
+                if status_msg.validator_hotkey != validator_hotkey:
+                    logger.warning(
+                        "Validator %s attempted to update job %s with mismatched hotkey %s",
+                        validator_hotkey,
+                        status_msg.job_id,
+                        status_msg.validator_hotkey,
+                    )
+                    continue
+
+                logger.info(
+                    "Received job status update for job %s from %s: %s",
+                    status_msg.job_id,
+                    validator_hotkey,
+                    status_msg.status,
+                )
+
+                await backend_service._update_job_status(
+                    status_msg.job_id,
+                    validator_hotkey,
+                    status_msg.status,
+                    status_msg.detail,
+                )
 
             elif message_type == MessageType.EPISODE_DATA:
                 # Handle episode data

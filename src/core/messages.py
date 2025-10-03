@@ -27,6 +27,7 @@ class MessageType(StrEnum):
     SET_WEIGHTS = "set_weights"
     EPISODE_DATA = "episode_data"
     EPISODE_STEP_DATA = "episode_step_data"
+    JOB_STATUS_UPDATE = "job_status_update"
     ERROR = "error"
 
     # Client-Backend WebSocket messages
@@ -114,6 +115,17 @@ class EvalResultMessage(SQLModel):
     logs: Optional[str] = None
     error: Optional[str] = None
     extra_data: Optional[dict] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class JobStatusUpdateMessage(SQLModel):
+    """Message for notifying backend about job status changes."""
+
+    message_type: MessageType = MessageType.JOB_STATUS_UPDATE
+    job_id: SnowflakeId
+    validator_hotkey: str
+    status: EvaluationStatus
+    detail: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

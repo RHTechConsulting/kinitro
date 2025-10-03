@@ -28,6 +28,7 @@ from core.messages import (
     EvalJobMessage,
     EvalResultMessage,
     HeartbeatMessage,
+    JobStatusUpdateMessage,
     MessageType,
     SetWeightsMessage,
     ValidatorRegisterMessage,
@@ -354,7 +355,39 @@ class WebSocketValidator(Neuron):
                     # Re-raise to let pgqueue handle retry
                     raise
 
-            logger.info("Result processor is now listening for evaluation results...")
+            @pgq.entrypoint("job_status_update")
+            async def process_job_status_update(job: Job) -> None:
+                """Process job status updates from the queue."""
+                try:
+                    status_data = json.loads(job.payload.decode("utf-8"))
+                    status_msg = JobStatusUpdateMessage(**status_data)
+
+                    logger.info(
+                        "Processing job status update for job %s: %s",
+                        status_msg.job_id,
+                        status_msg.status,
+                    )
+
+                    if self.connected and self.websocket:
+                        await self._send_job_status_update(status_msg)
+                        logger.info(
+                            "Sent job status update for job %s to backend",
+                            status_msg.job_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Not connected to backend, job status update for job %s will be retried",
+                            status_msg.job_id,
+                        )
+                        raise Exception("Not connected to backend")
+
+                except Exception as e:
+                    logger.error(f"Failed to process job status update: {e}")
+                    raise
+
+            logger.info(
+                "Result processor is now listening for evaluation data and status updates..."
+            )
             await pgq.run()
 
         except asyncio.CancelledError:
@@ -372,6 +405,10 @@ class WebSocketValidator(Neuron):
     async def _send_eval_result(self, result: EvalResultMessage):
         """Send evaluation result to the backend."""
         await self._send_message(result.model_dump())
+
+    async def _send_job_status_update(self, status_update: JobStatusUpdateMessage):
+        """Send job status update to the backend."""
+        await self._send_message(status_update.model_dump(mode="json"))
 
     async def _send_episode_data(self, episode_data: EpisodeDataMessage):
         """Send episode data to the backend."""

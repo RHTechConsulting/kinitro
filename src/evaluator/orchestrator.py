@@ -16,7 +16,7 @@ from snowflake import SnowflakeGenerator
 
 from core.db.models import EvaluationStatus
 from core.log import get_logger
-from core.messages import EvalJobMessage, EvalResultMessage
+from core.messages import EvalJobMessage, EvalResultMessage, JobStatusUpdateMessage
 from evaluator.config import EvaluatorConfig
 from evaluator.containers import Containers
 from evaluator.rollout import BenchmarkSpec, RolloutCluster
@@ -117,6 +117,19 @@ class Orchestrator:
             )
         except Exception as e:
             logger.error(f"Failed to update job status to STARTING: {e}")
+        else:
+            try:
+                status_msg = JobStatusUpdateMessage(
+                    job_id=eval_job_msg.job_id,
+                    validator_hotkey=self.keypair.ss58_address,
+                    status=EvaluationStatus.STARTING,
+                    detail="Evaluator is preparing the environment",
+                )
+                await self.db.queue_job_status_update_msg(status_msg)
+            except Exception as e:
+                logger.error(
+                    f"Failed to queue job status update for STARTING state: {e}"
+                )
 
         # Start a container for this evaluation job
         repo = "https://huggingface.co/" + eval_job_msg.hf_repo_id
@@ -208,6 +221,19 @@ class Orchestrator:
             )
         except Exception as e:
             logger.error(f"Failed to update job status to RUNNING: {e}")
+        else:
+            try:
+                status_msg = JobStatusUpdateMessage(
+                    job_id=eval_job_msg.job_id,
+                    validator_hotkey=self.keypair.ss58_address,
+                    status=EvaluationStatus.RUNNING,
+                    detail="Evaluator started processing the job",
+                )
+                await self.db.queue_job_status_update_msg(status_msg)
+            except Exception as e:
+                logger.error(
+                    f"Failed to queue job status update for RUNNING state: {e}"
+                )
 
         # Start the evaluation (non-blocking)
         logger.info(f"Starting evaluation for job {eval_job_msg.job_id}")
