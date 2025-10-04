@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from fastapi import WebSocket
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 
 from backend.constants import INITIAL_STATE_DATA_LIMIT
 from backend.events import (
@@ -21,7 +21,8 @@ from backend.events import (
     CompetitionCreatedEvent,
     EpisodeCompletedEvent,
     EvaluationCompletedEvent,
-    JobStatusChangedEvent,
+    JobCompletedEvent,
+    JobCreatedEvent,
     StatsUpdatedEvent,
     SubmissionReceivedEvent,
     ValidatorConnectedEvent,
@@ -54,6 +55,7 @@ try:
         MinerSubmission,
         ValidatorConnection,
     )
+    from core.db.models import EvaluationStatus
 except ImportError:
     # Handle case where models might not be available during testing
     pass
@@ -409,12 +411,10 @@ class RealtimeEventBroadcaster:
                 return await self._get_initial_stats_data(session)
 
             # Job-related events
-            elif event_type in [
-                EventType.JOB_STATUS_CHANGED,
-                EventType.JOB_CREATED,
-                EventType.JOB_COMPLETED,
-            ]:
-                return await self._get_initial_job_data(session, filters)
+            elif event_type == EventType.JOB_CREATED:
+                return await self._get_initial_job_created_data(session, filters)
+            elif event_type == EventType.JOB_COMPLETED:
+                return await self._get_initial_job_completed_data(session, filters)
 
             # Evaluation-related events
             elif event_type in [
@@ -441,9 +441,13 @@ class RealtimeEventBroadcaster:
             elif event_type in [EventType.EPISODE_COMPLETED, EventType.EPISODE_STARTED]:
                 return await self._get_initial_episode_data(session, filters)
 
+            # Validator events
+            elif event_type == EventType.VALIDATOR_CONNECTED:
+                return await self._get_initial_validator_data(session, filters)
+
             # Skip these events - either not suitable for initial data or too granular
             elif event_type in [
-                EventType.VALIDATOR_CONNECTED,
+                EventType.JOB_STATUS_CHANGED,
                 EventType.VALIDATOR_DISCONNECTED,
                 EventType.EPISODE_STEP,
             ]:
@@ -487,6 +491,67 @@ class RealtimeEventBroadcaster:
             )
             total_jobs = job_result.scalar() or 0
 
+            # Get completed jobs count (latest status is COMPLETED)
+            latest_status_subquery = (
+                select(
+                    BackendEvaluationJobStatus.job_id,
+                    func.max(BackendEvaluationJobStatus.created_at).label(
+                        "max_created_at"
+                    ),
+                )
+                .group_by(BackendEvaluationJobStatus.job_id)
+                .subquery()
+            )
+
+            completed_jobs_result = await session.execute(
+                select(func.count(BackendEvaluationJob.id.distinct()))
+                .select_from(BackendEvaluationJob)
+                .join(
+                    BackendEvaluationJobStatus,
+                    BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
+                )
+                .join(
+                    latest_status_subquery,
+                    and_(
+                        BackendEvaluationJobStatus.job_id
+                        == latest_status_subquery.c.job_id,
+                        BackendEvaluationJobStatus.created_at
+                        == latest_status_subquery.c.max_created_at,
+                    ),
+                )
+                .where(BackendEvaluationJobStatus.status == EvaluationStatus.COMPLETED)
+            )
+            completed_jobs = completed_jobs_result.scalar() or 0
+
+            # Get failed jobs count (latest status is FAILED, CANCELLED, or TIMEOUT)
+            failed_jobs_result = await session.execute(
+                select(func.count(BackendEvaluationJob.id.distinct()))
+                .select_from(BackendEvaluationJob)
+                .join(
+                    BackendEvaluationJobStatus,
+                    BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
+                )
+                .join(
+                    latest_status_subquery,
+                    and_(
+                        BackendEvaluationJobStatus.job_id
+                        == latest_status_subquery.c.job_id,
+                        BackendEvaluationJobStatus.created_at
+                        == latest_status_subquery.c.max_created_at,
+                    ),
+                )
+                .where(
+                    BackendEvaluationJobStatus.status.in_(
+                        [
+                            EvaluationStatus.FAILED,
+                            EvaluationStatus.CANCELLED,
+                            EvaluationStatus.TIMEOUT,
+                        ]
+                    )
+                )
+            )
+            failed_jobs = failed_jobs_result.scalar() or 0
+
             # Get results count
             result_count = await session.execute(
                 select(func.count(BackendEvaluationResult.id))
@@ -516,6 +581,8 @@ class RealtimeEventBroadcaster:
                 total_submissions=total_submissions,
                 total_jobs=total_jobs,
                 total_results=total_results,
+                completed_jobs=completed_jobs,
+                failed_jobs=failed_jobs,
                 last_seen_block=state.last_seen_block if state else 0,
                 competition_percentages=comp_percentages,
             )
@@ -565,22 +632,224 @@ class RealtimeEventBroadcaster:
             logger.error(f"Error getting initial validator data: {str(e)}")
             return []
 
-    async def _get_initial_job_data(
+    async def _get_initial_job_created_data(
         self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
     ) -> List[Dict[str, Any]]:
-        """Get recent job status data."""
+        """Get jobs that are currently queued or running (for JOB_CREATED subscriptions)."""
         try:
-            # BackendEvaluationJobStatus is imported at module level
+            # Find jobs with active statuses (QUEUED, STARTING, RUNNING)
+            # We need to get the latest status for each job and filter by those statuses
 
-            query = select(BackendEvaluationJobStatus)
+            # Get all jobs with their latest status
+            latest_status_subquery = (
+                select(
+                    BackendEvaluationJobStatus.job_id,
+                    func.max(BackendEvaluationJobStatus.created_at).label(
+                        "max_created_at"
+                    ),
+                )
+                .group_by(BackendEvaluationJobStatus.job_id)
+                .subquery()
+            )
+
+            # Join to get jobs with active statuses
+            query = (
+                select(
+                    BackendEvaluationJob,
+                    BackendEvaluationJobStatus.status.label("current_status"),
+                )
+                .join(
+                    BackendEvaluationJobStatus,
+                    BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
+                )
+                .join(
+                    latest_status_subquery,
+                    and_(
+                        BackendEvaluationJobStatus.job_id
+                        == latest_status_subquery.c.job_id,
+                        BackendEvaluationJobStatus.created_at
+                        == latest_status_subquery.c.max_created_at,
+                    ),
+                )
+                .where(
+                    BackendEvaluationJobStatus.status.in_(
+                        [
+                            EvaluationStatus.QUEUED,
+                            EvaluationStatus.STARTING,
+                            EvaluationStatus.RUNNING,
+                        ]
+                    )
+                )
+            )
 
             # Apply filters if any
             if filters:
                 for filter_key, filter_value in filters.items():
                     if filter_key == "job_id":
+                        query = query.where(BackendEvaluationJob.id == filter_value)
+                    elif filter_key == "competition_id":
                         query = query.where(
-                            BackendEvaluationJobStatus.job_id == filter_value
+                            BackendEvaluationJob.competition_id == filter_value
                         )
+                    elif filter_key == "miner_hotkey":
+                        query = query.where(
+                            BackendEvaluationJob.miner_hotkey == filter_value
+                        )
+
+            query = query.order_by(BackendEvaluationJob.created_at.desc()).limit(limit)
+
+            result = await session.execute(query)
+            job_rows = result.all()
+
+            unique_jobs = []
+            seen_job_ids = set()
+            for job, status in job_rows:
+                if job.id in seen_job_ids:
+                    continue
+                seen_job_ids.add(job.id)
+                unique_jobs.append((job, status))
+                if len(unique_jobs) >= limit:
+                    break
+
+            job_ids = [job.id for job, _ in unique_jobs]
+
+            validator_statuses_map: Dict[int, Dict[str, EvaluationStatus]] = {}
+            if job_ids:
+                latest_per_validator = (
+                    select(
+                        BackendEvaluationJobStatus.job_id,
+                        BackendEvaluationJobStatus.validator_hotkey,
+                        func.max(BackendEvaluationJobStatus.created_at).label(
+                            "max_created_at"
+                        ),
+                    )
+                    .where(BackendEvaluationJobStatus.job_id.in_(job_ids))
+                    .group_by(
+                        BackendEvaluationJobStatus.job_id,
+                        BackendEvaluationJobStatus.validator_hotkey,
+                    )
+                    .subquery()
+                )
+
+                status_query = (
+                    select(
+                        BackendEvaluationJobStatus.job_id,
+                        BackendEvaluationJobStatus.validator_hotkey,
+                        BackendEvaluationJobStatus.status,
+                    )
+                    .join(
+                        latest_per_validator,
+                        and_(
+                            BackendEvaluationJobStatus.job_id
+                            == latest_per_validator.c.job_id,
+                            BackendEvaluationJobStatus.validator_hotkey
+                            == latest_per_validator.c.validator_hotkey,
+                            BackendEvaluationJobStatus.created_at
+                            == latest_per_validator.c.max_created_at,
+                        ),
+                    )
+                    .where(
+                        BackendEvaluationJobStatus.status.in_(
+                            [
+                                EvaluationStatus.QUEUED,
+                                EvaluationStatus.STARTING,
+                                EvaluationStatus.RUNNING,
+                            ]
+                        )
+                    )
+                )
+
+                status_rows = await session.execute(status_query)
+                for job_id, validator_hotkey, val_status in status_rows:
+                    status_enum = (
+                        val_status
+                        if isinstance(val_status, EvaluationStatus)
+                        else EvaluationStatus(val_status)
+                    )
+                    validator_statuses_map.setdefault(job_id, {})[validator_hotkey] = (
+                        status_enum
+                    )
+
+            job_data = []
+            for job, status in unique_jobs:
+                current_status = (
+                    status
+                    if isinstance(status, EvaluationStatus) or status is None
+                    else EvaluationStatus(status)
+                )
+                if current_status is None:
+                    current_status = EvaluationStatus.QUEUED
+
+                event = JobCreatedEvent(
+                    job_id=job.id,
+                    competition_id=job.competition_id,
+                    submission_id=job.submission_id,
+                    miner_hotkey=job.miner_hotkey,
+                    hf_repo_id=job.hf_repo_id,
+                    env_provider=job.env_provider,
+                    benchmark_name=job.benchmark_name,
+                    config=job.config if job.config else {},
+                    status=current_status,
+                    validator_statuses=validator_statuses_map.get(job.id, {}),
+                )
+                job_data.append(event.model_dump(mode="json"))
+
+            return job_data
+
+        except Exception as e:
+            logger.error(f"Error getting initial job created data: {str(e)}")
+            return []
+
+    async def _get_initial_job_completed_data(
+        self, session, filters: Dict[str, Any], limit: int = INITIAL_STATE_DATA_LIMIT
+    ) -> List[Dict[str, Any]]:
+        """Get recently completed jobs (for JOB_COMPLETED subscriptions)."""
+        try:
+            # Find jobs that have completed status
+            latest_status_subquery = (
+                select(
+                    BackendEvaluationJobStatus.job_id,
+                    func.max(BackendEvaluationJobStatus.created_at).label(
+                        "max_created_at"
+                    ),
+                )
+                .group_by(BackendEvaluationJobStatus.job_id)
+                .subquery()
+            )
+
+            # Join to get jobs with completed/failed/cancelled/timeout statuses
+            query = (
+                select(BackendEvaluationJob, BackendEvaluationJobStatus)
+                .join(
+                    BackendEvaluationJobStatus,
+                    BackendEvaluationJob.id == BackendEvaluationJobStatus.job_id,
+                )
+                .join(
+                    latest_status_subquery,
+                    and_(
+                        BackendEvaluationJobStatus.job_id
+                        == latest_status_subquery.c.job_id,
+                        BackendEvaluationJobStatus.created_at
+                        == latest_status_subquery.c.max_created_at,
+                    ),
+                )
+                .where(
+                    BackendEvaluationJobStatus.status.in_(
+                        [
+                            EvaluationStatus.COMPLETED,
+                            EvaluationStatus.FAILED,
+                            EvaluationStatus.CANCELLED,
+                            EvaluationStatus.TIMEOUT,
+                        ]
+                    )
+                )
+            )
+
+            # Apply filters if any
+            if filters:
+                for filter_key, filter_value in filters.items():
+                    if filter_key == "job_id":
+                        query = query.where(BackendEvaluationJob.id == filter_value)
                     elif filter_key == "validator_hotkey":
                         query = query.where(
                             BackendEvaluationJobStatus.validator_hotkey == filter_value
@@ -591,24 +860,24 @@ class RealtimeEventBroadcaster:
             )
 
             result = await session.execute(query)
-            job_statuses = result.scalars().all()
+            rows = result.all()
 
             job_data = []
-            for job_status in job_statuses:
-                # Use JobStatusChangedEvent model
-                event = JobStatusChangedEvent(
-                    job_id=str(job_status.job_id),
-                    validator_hotkey=job_status.validator_hotkey,
-                    status=job_status.status.value,
-                    detail=job_status.detail,
-                    created_at=job_status.created_at,
+            for job, status in rows:
+                # Use JobCompletedEvent model
+                event = JobCompletedEvent(
+                    job_id=str(job.id),
+                    validator_hotkey=status.validator_hotkey,
+                    status=status.status.value,
+                    detail=status.detail,
+                    result_count=0,  # Could be enhanced to count results
                 )
                 job_data.append(event.model_dump(mode="json"))
 
             return job_data
 
         except Exception as e:
-            logger.error(f"Error getting initial job data: {str(e)}")
+            logger.error(f"Error getting initial job completed data: {str(e)}")
             return []
 
     async def _get_initial_evaluation_data(
@@ -783,6 +1052,10 @@ class RealtimeEventBroadcaster:
                         query = query.where(EpisodeData.submission_id == filter_value)
                     elif filter_key == "episode_id":
                         query = query.where(EpisodeData.episode_id == filter_value)
+                    elif filter_key == "validator_hotkey":
+                        query = query.where(
+                            EpisodeData.validator_hotkey == filter_value
+                        )
 
             query = query.order_by(EpisodeData.created_at.desc()).limit(limit)
 
@@ -795,10 +1068,11 @@ class RealtimeEventBroadcaster:
                 event = EpisodeCompletedEvent(
                     job_id=str(episode.job_id),
                     submission_id=str(episode.submission_id),
+                    validator_hotkey=episode.validator_hotkey,
                     episode_id=episode.episode_id,
                     env_name=episode.env_name,
                     benchmark_name=episode.benchmark_name,
-                    total_reward=episode.total_reward,
+                    final_reward=episode.final_reward,
                     success=episode.success,
                     steps=episode.steps,
                     start_time=episode.start_time or datetime.now(timezone.utc),

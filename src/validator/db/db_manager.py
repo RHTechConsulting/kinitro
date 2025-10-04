@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.db.models import SnowflakeId
-from core.messages import EvalResultMessage
+from core.messages import EvalResultMessage, JobStatusUpdateMessage
 
 from .models import (
     EvaluationJob,
@@ -177,4 +177,15 @@ class DatabaseManager:
         q = Queries(driver)
         eval_result_bytes = eval_result.model_dump_json().encode("utf-8")
         await q.enqueue(["eval_result"], [eval_result_bytes], [0])
+        await conn.close()
+
+    async def queue_job_status_update_msg(
+        self, job_status: JobStatusUpdateMessage
+    ) -> None:
+        """Queue a job status update message for processing."""
+        conn = await asyncpg.connect(dsn=self.postgres_url)
+        driver = AsyncpgDriver(conn)
+        q = Queries(driver)
+        status_bytes = job_status.model_dump_json().encode("utf-8")
+        await q.enqueue(["job_status_update"], [status_bytes], [0])
         await conn.close()

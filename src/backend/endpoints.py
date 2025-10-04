@@ -15,7 +15,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 
 from backend.auth import (
@@ -47,6 +47,7 @@ from core.messages import (
     EpisodeDataMessage,
     EpisodeStepDataMessage,
     EvalResultMessage,
+    JobStatusUpdateMessage,
     EventType,
     MessageType,
 )
@@ -691,13 +692,14 @@ async def get_result(result_id: int):
 class EpisodeDataResponse(BaseModel):
     """Response model for episode data."""
 
-    id: int
-    job_id: int
+    id: str
+    job_id: str
     submission_id: str
-    episode_id: int
+    validator_hotkey: Optional[str]
+    episode_id: str
     env_name: str
     benchmark_name: str
-    total_reward: float
+    final_reward: float
     success: bool
     steps: int
     start_time: datetime
@@ -709,13 +711,19 @@ class EpisodeDataResponse(BaseModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", "job_id", "episode_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
+
 
 class EpisodeStepDataResponse(BaseModel):
     """Response model for episode step data."""
 
-    id: int
-    episode_id: int
+    id: str
+    episode_id: str
     submission_id: str
+    validator_hotkey: Optional[str]
     step: int
     action: dict
     reward: float
@@ -730,11 +738,19 @@ class EpisodeStepDataResponse(BaseModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", "episode_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
+
 
 @app.get("/episodes", response_model=List[EpisodeDataResponse])
 async def get_episodes(
     job_id: Optional[int] = Query(None, description="Filter by job ID"),
     submission_id: Optional[str] = Query(None, description="Filter by submission ID"),
+    validator_hotkey: Optional[str] = Query(
+        None, description="Filter by validator hotkey"
+    ),
     success: Optional[bool] = Query(None, description="Filter by success status"),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
@@ -754,6 +770,8 @@ async def get_episodes(
             query = query.where(EpisodeData.job_id == job_id)
         if submission_id is not None:
             query = query.where(EpisodeData.submission_id == submission_id)
+        if validator_hotkey is not None:
+            query = query.where(EpisodeData.validator_hotkey == validator_hotkey)
         if success is not None:
             query = query.where(EpisodeData.success == success)
 
@@ -832,6 +850,9 @@ async def get_episode_steps(
 @app.get("/steps", response_model=List[EpisodeStepDataResponse])
 async def get_steps(
     submission_id: Optional[str] = Query(None, description="Filter by submission ID"),
+    validator_hotkey: Optional[str] = Query(
+        None, description="Filter by validator hotkey"
+    ),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -848,6 +869,8 @@ async def get_steps(
         # Apply filters
         if submission_id is not None:
             query = query.where(EpisodeStepData.submission_id == submission_id)
+        if validator_hotkey is not None:
+            query = query.where(EpisodeStepData.validator_hotkey == validator_hotkey)
 
         # Apply pagination
         query = query.limit(limit).offset(offset).order_by(EpisodeStepData.step)
@@ -1169,6 +1192,9 @@ async def validator_websocket(websocket: WebSocket):
         )
         await event_broadcaster.broadcast_event(EventType.VALIDATOR_CONNECTED, event)
 
+        # Broadcast updated stats (validator count changed)
+        await backend_service._broadcast_stats_update()
+
         # Handle messages
         while True:
             data = await websocket.receive_text()
@@ -1275,17 +1301,17 @@ async def validator_websocket(websocket: WebSocket):
                         # Create evaluation completed event
                         # Pydantic will automatically handle datetime to ISO conversion
                         eval_event = EvaluationCompletedEvent(
-                            job_id=result.job_id,
-                            validator_hotkey=result.validator_hotkey,
-                            miner_hotkey=result.miner_hotkey,
-                            competition_id=result.competition_id,
-                            benchmark_name=result.benchmark_name,
-                            score=result.score,
-                            success_rate=result.success_rate,
-                            avg_reward=result.avg_reward,
-                            total_episodes=result.total_episodes,
-                            result_time=result.result_time,
-                            created_at=result.created_at,
+                            job_id=eval_result.job_id,
+                            validator_hotkey=eval_result.validator_hotkey,
+                            miner_hotkey=eval_result.miner_hotkey,
+                            competition_id=eval_result.competition_id,
+                            benchmark_name=eval_result.benchmark,
+                            score=eval_result.score,
+                            success_rate=eval_result.success_rate,
+                            avg_reward=eval_result.avg_reward,
+                            total_episodes=eval_result.total_episodes,
+                            result_time=eval_result.result_time,
+                            created_at=eval_result.created_at,
                         )
                         await event_broadcaster.broadcast_event(
                             EventType.EVALUATION_COMPLETED, eval_event
@@ -1296,11 +1322,37 @@ async def validator_websocket(websocket: WebSocket):
                             json.dumps(
                                 {
                                     "message_type": MessageType.RESULT_ACK,
-                                    "job_id": result_msg.job_id,
+                                    "job_id": str(result_msg.job_id),
                                     "status": "received",
                                 }
                             )
                         )
+
+            elif message_type == MessageType.JOB_STATUS_UPDATE:
+                status_msg = JobStatusUpdateMessage(**message)
+
+                if status_msg.validator_hotkey != validator_hotkey:
+                    logger.warning(
+                        "Validator %s attempted to update job %s with mismatched hotkey %s",
+                        validator_hotkey,
+                        status_msg.job_id,
+                        status_msg.validator_hotkey,
+                    )
+                    continue
+
+                logger.info(
+                    "Received job status update for job %s from %s: %s",
+                    status_msg.job_id,
+                    validator_hotkey,
+                    status_msg.status,
+                )
+
+                await backend_service._update_job_status(
+                    status_msg.job_id,
+                    validator_hotkey,
+                    status_msg.status,
+                    status_msg.detail,
+                )
 
             elif message_type == MessageType.EPISODE_DATA:
                 # Handle episode data
@@ -1316,11 +1368,12 @@ async def validator_websocket(websocket: WebSocket):
                         id=next(backend_service.id_generator),
                         job_id=episode_msg.job_id,
                         submission_id=episode_msg.submission_id,
+                        validator_hotkey=validator_hotkey,
                         task_id=episode_msg.task_id,
                         episode_id=episode_msg.episode_id,
                         env_name=episode_msg.env_name,
                         benchmark_name=episode_msg.benchmark_name,
-                        total_reward=episode_msg.total_reward,
+                        final_reward=episode_msg.final_reward,
                         success=episode_msg.success,
                         steps=episode_msg.steps,
                         start_time=datetime.fromisoformat(episode_msg.start_time)
@@ -1339,10 +1392,11 @@ async def validator_websocket(websocket: WebSocket):
                     episode_event = EpisodeCompletedEvent(
                         job_id=episode_msg.job_id,
                         submission_id=episode_msg.submission_id,
+                        validator_hotkey=validator_hotkey,
                         episode_id=episode_msg.episode_id,
                         env_name=episode_msg.env_name,
                         benchmark_name=episode_msg.benchmark_name,
-                        total_reward=episode_msg.total_reward,
+                        final_reward=episode_msg.final_reward,
                         success=episode_msg.success,
                         steps=episode_msg.steps,
                         start_time=episode_msg.start_time
@@ -1352,6 +1406,7 @@ async def validator_websocket(websocket: WebSocket):
                         if isinstance(episode_msg.end_time, datetime)
                         else datetime.fromisoformat(episode_msg.end_time),
                         extra_metrics=episode_msg.extra_metrics,
+                        created_at=datetime.now(timezone.utc),
                     )
                     await event_broadcaster.broadcast_event(
                         EventType.EPISODE_COMPLETED, episode_event
@@ -1408,6 +1463,7 @@ async def validator_websocket(websocket: WebSocket):
                             id=next(backend_service.id_generator),
                             episode_id=episode_record.id,  # Use the database episode ID
                             submission_id=step_msg.submission_id,
+                            validator_hotkey=validator_hotkey,
                             task_id=step_msg.task_id,
                             step=step_msg.step,
                             action=step_msg.action,
@@ -1427,6 +1483,7 @@ async def validator_websocket(websocket: WebSocket):
                         # Broadcast episode step event to clients
                         step_event = EpisodeStepEvent(
                             submission_id=step_msg.submission_id,
+                            validator_hotkey=validator_hotkey,
                             episode_id=step_msg.episode_id,
                             step=step_msg.step,
                             action=step_msg.action,
@@ -1482,6 +1539,9 @@ async def validator_websocket(websocket: WebSocket):
             await event_broadcaster.broadcast_event(
                 EventType.VALIDATOR_DISCONNECTED, disconnected_event
             )
+
+            # Broadcast updated stats (validator count changed)
+            await backend_service._broadcast_stats_update()
 
 
 # ============================================================================

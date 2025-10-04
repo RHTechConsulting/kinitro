@@ -6,9 +6,12 @@ broadcast to frontend clients via WebSocket connections.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+
+from backend.models import SS58Address
+from core.db.models import EvaluationStatus
 
 
 class BaseEvent(BaseModel):
@@ -23,11 +26,6 @@ class BaseEvent(BaseModel):
 
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @field_serializer("timestamp", when_used="json")
-    def serialize_timestamp(self, timestamp: datetime) -> str:
-        """Serialize timestamp to ISO format string."""
-        return timestamp.isoformat()
-
     @field_serializer("*", mode="wrap")
     def serialize_datetime_fields(self, value, serializer, info):
         """Automatically serialize any datetime field to ISO format."""
@@ -36,57 +34,87 @@ class BaseEvent(BaseModel):
         return serializer(value)
 
 
-# Job Events
-class JobCreatedEvent(BaseEvent):
-    """Event data for JOB_CREATED event."""
+class JobEventMixin(BaseModel):
+    """Mixin for events that include a job_id field."""
 
     job_id: str
-    validator_hotkey: str
+
+    @field_validator("job_id", mode="before")
+    @classmethod
+    def convert_job_id_to_string(cls, v: Union[int, str]) -> str:
+        """Convert job_id to string if it's an integer."""
+        return str(v)
+
+
+class SubmissionEventMixin(BaseModel):
+    """Mixin for events that include a submission_id field."""
+
+    submission_id: str
+
+    @field_validator("submission_id", mode="before")
+    @classmethod
+    def convert_submission_id_to_string(cls, v: Union[int, str]) -> str:
+        """Convert submission_id to string if it's an integer."""
+        return str(v)
+
+
+class EpisodeEventMixin(BaseModel):
+    """Mixin for events that include an episode_id field."""
+
+    episode_id: str
+
+    @field_validator("episode_id", mode="before")
+    @classmethod
+    def convert_episode_id_to_string(cls, v: Union[int, str]) -> str:
+        """Convert episode_id to string if it's an integer."""
+        return str(v)
+
+
+# Job Events
+class JobCreatedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
+    """Event data for JOB_CREATED event."""
+
     competition_id: str
-    submission_id: int
     miner_hotkey: str
     hf_repo_id: str
     env_provider: str
     benchmark_name: str
     config: Dict[str, Any]
+    status: EvaluationStatus
+    validator_statuses: Dict[str, EvaluationStatus] = Field(default_factory=dict)
 
 
-class JobStatusChangedEvent(BaseEvent):
+class JobStatusChangedEvent(JobEventMixin, BaseEvent):
     """Event data for JOB_STATUS_CHANGED event."""
 
-    job_id: str
     validator_hotkey: str
-    status: str
+    status: EvaluationStatus
     detail: Optional[str] = None
     created_at: datetime
 
 
-class JobCompletedEvent(BaseEvent):
+class JobCompletedEvent(JobEventMixin, BaseEvent):
     """Event data for JOB_COMPLETED event."""
 
-    job_id: str
     validator_hotkey: str
-    status: str
+    status: EvaluationStatus
     detail: Optional[str] = None
     result_count: int = 0
 
 
 # Evaluation Events
-class EvaluationStartedEvent(BaseEvent):
+class EvaluationStartedEvent(JobEventMixin, SubmissionEventMixin, BaseEvent):
     """Event data for EVALUATION_STARTED event."""
 
-    job_id: str
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
-    submission_id: int
     benchmark_name: str
 
 
-class EvaluationProgressEvent(BaseEvent):
+class EvaluationProgressEvent(JobEventMixin, BaseEvent):
     """Event data for EVALUATION_PROGRESS event."""
 
-    job_id: str
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -96,10 +124,9 @@ class EvaluationProgressEvent(BaseEvent):
     success_rate: float
 
 
-class EvaluationCompletedEvent(BaseEvent):
+class EvaluationCompletedEvent(JobEventMixin, BaseEvent):
     """Event data for EVALUATION_COMPLETED event."""
 
-    job_id: str
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -113,21 +140,18 @@ class EvaluationCompletedEvent(BaseEvent):
 
 
 # Episode Events
-class EpisodeStartedEvent(BaseEvent):
+class EpisodeStartedEvent(
+    JobEventMixin, SubmissionEventMixin, EpisodeEventMixin, BaseEvent
+):
     """Event data for EPISODE_STARTED event."""
 
-    job_id: str
-    submission_id: str
-    episode_id: int
     env_name: str
     benchmark_name: str
 
 
-class EpisodeStepEvent(BaseEvent):
+class EpisodeStepEvent(SubmissionEventMixin, EpisodeEventMixin, BaseEvent):
     """Event data for EPISODE_STEP event."""
 
-    submission_id: str
-    episode_id: int
     step: int
     action: Dict[str, Any]
     reward: float
@@ -135,23 +159,24 @@ class EpisodeStepEvent(BaseEvent):
     truncated: bool
     observation_refs: Dict[str, Any]
     info: Optional[Dict[str, Any]] = None
+    validator_hotkey: Optional[SS58Address] = None
 
 
-class EpisodeCompletedEvent(BaseEvent):
+class EpisodeCompletedEvent(
+    JobEventMixin, SubmissionEventMixin, EpisodeEventMixin, BaseEvent
+):
     """Event data for EPISODE_COMPLETED event."""
 
-    job_id: str
-    submission_id: str
-    episode_id: int
     env_name: str
     benchmark_name: str
-    total_reward: float
+    final_reward: float
     success: bool
     steps: int
     start_time: datetime
     end_time: datetime
     extra_metrics: Optional[Dict[str, Any]] = None
     created_at: datetime
+    validator_hotkey: Optional[SS58Address] = None
 
 
 # Competition Events
@@ -201,10 +226,9 @@ class CompetitionDeactivatedEvent(BaseEvent):
 
 
 # Submission Events
-class SubmissionReceivedEvent(BaseEvent):
+class SubmissionReceivedEvent(SubmissionEventMixin, BaseEvent):
     """Event data for SUBMISSION_RECEIVED event."""
 
-    submission_id: int
     competition_id: str
     miner_hotkey: str
     hf_repo_id: str
@@ -241,5 +265,7 @@ class StatsUpdatedEvent(BaseEvent):
     total_submissions: int
     total_jobs: int
     total_results: int
+    completed_jobs: int
+    failed_jobs: int
     last_seen_block: int
     competition_percentages: Dict[str, float]

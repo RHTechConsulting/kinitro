@@ -16,7 +16,7 @@ from snowflake import SnowflakeGenerator
 
 from core.db.models import EvaluationStatus
 from core.log import get_logger
-from core.messages import EvalJobMessage, EvalResultMessage
+from core.messages import EvalJobMessage, EvalResultMessage, JobStatusUpdateMessage
 from evaluator.config import EvaluatorConfig
 from evaluator.containers import Containers
 from evaluator.rollout import BenchmarkSpec, RolloutCluster
@@ -33,6 +33,7 @@ QUEUE_MAXSIZE = 100
 # TODO: this might be way too long
 EVAL_TIMEOUT = 3600
 RAY_WAIT_TIMEOUT = 0.1
+MIN_CONCURRENT_JOBS = 4
 
 
 class Orchestrator:
@@ -48,8 +49,15 @@ class Orchestrator:
 
         # Track running jobs for concurrent execution
         self.running_jobs: Dict[str, Dict] = {}  # job_id -> job_info
-        self.max_concurrent_jobs = config.max_concurrent_jobs
+        if config.max_concurrent_jobs < MIN_CONCURRENT_JOBS:
+            logger.warning(
+                "Configured max_concurrent_jobs (%s) below minimum (%s); clamping.",
+                config.max_concurrent_jobs,
+                MIN_CONCURRENT_JOBS,
+            )
+        self.max_concurrent_jobs = max(MIN_CONCURRENT_JOBS, config.max_concurrent_jobs)
         self.job_timeout = config.settings.get("job_timeout_seconds", EVAL_TIMEOUT)
+        self.concurrent_slots = asyncio.Semaphore(self.max_concurrent_jobs)
 
         # Initialize Ray with explicit configuration
         if not ray.is_initialized():
@@ -109,6 +117,19 @@ class Orchestrator:
             )
         except Exception as e:
             logger.error(f"Failed to update job status to STARTING: {e}")
+        else:
+            try:
+                status_msg = JobStatusUpdateMessage(
+                    job_id=eval_job_msg.job_id,
+                    validator_hotkey=self.keypair.ss58_address,
+                    status=EvaluationStatus.STARTING,
+                    detail="Evaluator is preparing the environment",
+                )
+                await self.db.queue_job_status_update_msg(status_msg)
+            except Exception as e:
+                logger.error(
+                    f"Failed to queue job status update for STARTING state: {e}"
+                )
 
         # Start a container for this evaluation job
         repo = "https://huggingface.co/" + eval_job_msg.hf_repo_id
@@ -200,6 +221,19 @@ class Orchestrator:
             )
         except Exception as e:
             logger.error(f"Failed to update job status to RUNNING: {e}")
+        else:
+            try:
+                status_msg = JobStatusUpdateMessage(
+                    job_id=eval_job_msg.job_id,
+                    validator_hotkey=self.keypair.ss58_address,
+                    status=EvaluationStatus.RUNNING,
+                    detail="Evaluator started processing the job",
+                )
+                await self.db.queue_job_status_update_msg(status_msg)
+            except Exception as e:
+                logger.error(
+                    f"Failed to queue job status update for RUNNING state: {e}"
+                )
 
         # Start the evaluation (non-blocking)
         logger.info(f"Starting evaluation for job {eval_job_msg.job_id}")
@@ -498,13 +532,32 @@ class Orchestrator:
 
     async def process_job(self, job: Job):
         """Process a job asynchronously without blocking."""
-        job_context = await self.setup_job(job)
-        if job_context:
-            job_id = job_context["job_id"]
-            self.running_jobs[job_id] = job_context
-            logger.info(
-                f"Job {job_id} added to running jobs. Total running: {len(self.running_jobs)}"
+        if self.concurrent_slots.locked():
+            logger.warning(
+                f"Max concurrent jobs ({self.max_concurrent_jobs}) reached. Job {getattr(job, 'id', 'unknown')} waiting for a free slot."
             )
+
+        await self.concurrent_slots.acquire()
+
+        try:
+            job_context = await self.setup_job(job)
+        except Exception as e:
+            logger.error(f"Failed to process job {getattr(job, 'id', 'unknown')}: {e}")
+            self.concurrent_slots.release()
+            return
+
+        if not job_context:
+            logger.warning(
+                f"Setup for job {getattr(job, 'id', 'unknown')} returned no context; releasing slot."
+            )
+            self.concurrent_slots.release()
+            return
+
+        job_id = job_context["job_id"]
+        self.running_jobs[job_id] = job_context
+        logger.info(
+            f"Job {job_id} added to running jobs. Total running: {len(self.running_jobs)}"
+        )
 
     async def monitor_running_jobs(self):
         """Background task to monitor all running jobs."""
@@ -518,12 +571,11 @@ class Orchestrator:
 
                 # Remove completed jobs
                 for job_id in completed_jobs:
-                    # Clear job context before deletion
-                    job_context = self.running_jobs.get(job_id)
-                    if job_context:
+                    job_context = self.running_jobs.pop(job_id, None)
+                    if job_context is not None:
+                        self.concurrent_slots.release()
                         # Clear references to heavy objects
                         job_context.clear()
-                    del self.running_jobs[job_id]
                     logger.info(
                         f"Job {job_id} removed from running jobs. Remaining: {len(self.running_jobs)}"
                     )
@@ -661,16 +713,7 @@ class Orchestrator:
 
         @pgq.entrypoint("add_job")
         async def process(job: Job) -> None:
-            # Check if we can accept more jobs
-            if len(self.running_jobs) >= self.max_concurrent_jobs:
-                logger.warning(
-                    f"Max concurrent jobs ({self.max_concurrent_jobs}) reached. Job {job.id} will be delayed."
-                )
-                # Wait until a slot becomes available
-                while len(self.running_jobs) >= self.max_concurrent_jobs:
-                    await asyncio.sleep(1)
-
-            asyncio.get_event_loop().create_task(self.process_job(job))
+            asyncio.create_task(self.process_job(job))
             logger.info(f"Job {job.id} added to processing queue.")
 
         logger.info(
@@ -689,29 +732,30 @@ class Orchestrator:
         logger.info("Stopping orchestrator...")
         # Clean up all running jobs
         for job_id in list(self.running_jobs.keys()):
-            job_context = self.running_jobs.get(job_id)
-            if job_context:
-                try:
-                    # Clean up queues first
-                    self._cleanup_queues(job_context)
+            job_context = self.running_jobs.pop(job_id, None)
+            if job_context is None:
+                continue
+            try:
+                # Clean up queues first
+                self._cleanup_queues(job_context)
 
-                    cluster = job_context.get("cluster")
-                    worker = job_context.get("worker")
-                    if cluster and worker:
-                        # Try to call cleanup on the worker before killing it
-                        try:
-                            ray.get(worker.cleanup.remote(), timeout=2)
-                        except Exception as e:
-                            logger.warning(
-                                f"Worker cleanup failed during shutdown: {e}"
-                            )
-                        cluster.delete_worker(worker)
-                    submission_id = job_context.get("submission_id")
-                    if submission_id:
-                        containers = Containers()
-                        containers.cleanup_container(submission_id)
-                except Exception as e:
-                    logger.error(f"Error cleaning up job {job_id}: {e}")
+                cluster = job_context.get("cluster")
+                worker = job_context.get("worker")
+                if cluster and worker:
+                    # Try to call cleanup on the worker before killing it
+                    try:
+                        ray.get(worker.cleanup.remote(), timeout=2)
+                    except Exception as e:
+                        logger.warning(f"Worker cleanup failed during shutdown: {e}")
+                    cluster.delete_worker(worker)
+                submission_id = job_context.get("submission_id")
+                if submission_id:
+                    containers = Containers()
+                    containers.cleanup_container(submission_id)
+            except Exception as e:
+                logger.error(f"Error cleaning up job {job_id}: {e}")
+            finally:
+                self.concurrent_slots.release()
 
         self.running_jobs.clear()
 

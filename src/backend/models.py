@@ -23,6 +23,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.sql import func
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
+from pydantic import field_validator
 
 from backend.constants import (
     DEFAULT_MIN_AVG_REWARD,
@@ -80,7 +81,7 @@ class ValidatorInfoResponse(SQLModel):
 
     validator_hotkey: str
     connection_id: str
-    api_key_id: Optional[SnowflakeId]
+    api_key_id: Optional[str]
     is_connected: bool
     first_connected_at: datetime
     last_heartbeat: datetime
@@ -91,11 +92,16 @@ class ValidatorInfoResponse(SQLModel):
     class Config:
         from_attributes = True
 
+    @field_validator("api_key_id", mode="before")
+    @classmethod
+    def _convert_api_key_id(cls, value):
+        return None if value is None else str(value)
+
 
 class MinerSubmissionResponse(SQLModel):
     """Response model for miner submission data."""
 
-    id: SnowflakeId
+    id: str
     miner_hotkey: str
     competition_id: str
     hf_repo_id: str
@@ -107,12 +113,17 @@ class MinerSubmissionResponse(SQLModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def _convert_id(cls, value):
+        return str(value)
+
 
 class JobResponse(SQLModel):
     """Response model for job data."""
 
-    id: SnowflakeId
-    submission_id: int
+    id: str
+    submission_id: str
     competition_id: str
     miner_hotkey: str
     hf_repo_id: str
@@ -124,12 +135,17 @@ class JobResponse(SQLModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", "submission_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
+
 
 class EvaluationResultResponse(SQLModel):
     """Response model for evaluation result data."""
 
-    id: SnowflakeId
-    job_id: SnowflakeId
+    id: str
+    job_id: str
     validator_hotkey: str
     miner_hotkey: str
     competition_id: str
@@ -144,12 +160,17 @@ class EvaluationResultResponse(SQLModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", "job_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
+
 
 class JobStatusResponse(SQLModel):
     """Response model for job status data."""
 
-    id: SnowflakeId
-    job_id: SnowflakeId
+    id: str
+    job_id: str
     validator_hotkey: str
     status: EvaluationStatus
     detail: Optional[str]
@@ -158,6 +179,11 @@ class JobStatusResponse(SQLModel):
 
     class Config:
         from_attributes = True
+
+    @field_validator("id", "job_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
 
 
 class BackendStatsResponse(SQLModel):
@@ -187,7 +213,7 @@ class ApiKeyCreateRequest(SQLModel):
 class ApiKeyResponse(SQLModel):
     """Response model for API key data (without the actual key)."""
 
-    id: SnowflakeId
+    id: str
     name: str
     description: Optional[str]
     role: str
@@ -201,11 +227,16 @@ class ApiKeyResponse(SQLModel):
     class Config:
         from_attributes = True
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def _convert_id(cls, value):
+        return str(value)
+
 
 class ApiKeyCreateResponse(SQLModel):
     """Response model for API key creation (includes the actual key)."""
 
-    id: SnowflakeId
+    id: str
     name: str
     description: Optional[str]
     role: str
@@ -217,6 +248,11 @@ class ApiKeyCreateResponse(SQLModel):
 
     class Config:
         from_attributes = True
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _convert_id(cls, value):
+        return str(value)
 
 
 # Models for DB tables
@@ -510,6 +546,10 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
         )
     )
     submission_id: str = Field(max_length=128, nullable=False, index=True)
+    validator_hotkey: Optional[SS58Address] = Field(
+        default=None,
+        sa_column=Column(SAString(48), nullable=True),
+    )
 
     # Episode metadata
     task_id: str = Field(max_length=128, nullable=False, index=True)
@@ -518,7 +558,7 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
     benchmark_name: str = Field(max_length=128, nullable=False)
 
     # Episode results
-    total_reward: float = Field(nullable=False)
+    final_reward: float = Field(nullable=False)
     success: bool = Field(nullable=False, index=True)
     steps: int = Field(nullable=False)
 
@@ -546,6 +586,7 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
         Index("ix_episode_data_episode", "episode_id"),
         Index("ix_episode_data_success", "success"),
         Index("ix_episode_data_submission_task", "submission_id", "task_id"),
+        Index("ix_episode_data_validator", "validator_hotkey"),
     )
 
 
@@ -566,6 +607,10 @@ class EpisodeStepData(TimestampMixin, SQLModel, table=True):
         )
     )
     submission_id: str = Field(max_length=128, nullable=False, index=True)
+    validator_hotkey: Optional[SS58Address] = Field(
+        default=None,
+        sa_column=Column(SAString(48), nullable=True),
+    )
 
     # Step metadata
     task_id: str = Field(max_length=128, nullable=False, index=True)
@@ -601,6 +646,7 @@ class EpisodeStepData(TimestampMixin, SQLModel, table=True):
         Index("ix_episode_step_submission", "submission_id"),
         Index("ix_episode_step_task", "task_id"),
         Index("ix_episode_step_step", "step"),
+        Index("ix_episode_step_validator", "validator_hotkey"),
         UniqueConstraint(
             "episode_id", "step", name="uq_episode_step"
         ),  # Ensure unique steps per episode
