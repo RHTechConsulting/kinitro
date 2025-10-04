@@ -90,7 +90,7 @@ class RealRolloutWorker:
         observation, info = env.reset()
         done = False
         step_count = 0
-        final_reward = 0.0
+        cum_reward = 0.0
 
         episode_start = time.time()
 
@@ -108,7 +108,8 @@ class RealRolloutWorker:
                 # Step environment
                 observation, reward, terminated, truncated, info = env.step(action)
 
-                final_reward = float(reward)
+                reward_value = float(reward)
+                cum_reward += reward_value
                 step_count += 1
                 done = terminated or truncated
 
@@ -122,14 +123,14 @@ class RealRolloutWorker:
 
         logger.info(
             f"Episode {episode_id} completed: {step_count} steps, "
-            f"reward={final_reward:.2f}, duration={episode_duration:.2f}s"
+            f"cum_reward={cum_reward:.2f}, duration={episode_duration:.2f}s"
         )
 
         return {
             "episode_id": episode_id,
             "env_spec": env_spec,
             "steps": step_count,
-            "reward": final_reward,
+            "reward": cum_reward,
             "duration": episode_duration,
             "success": info.get("success", 0.0) if info else 0.0,
         }

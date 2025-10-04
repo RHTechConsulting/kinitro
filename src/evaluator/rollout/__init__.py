@@ -358,7 +358,7 @@ class RolloutWorker:
 
         done = False
         step_count = 0
-        final_reward = 0.0
+        cum_reward = 0.0
         episode_steps = []
         episode_start = time.time()
 
@@ -417,12 +417,13 @@ class RolloutWorker:
                 if info and info.get("success"):
                     done = True
 
-                final_reward = float(reward)
+                reward_value = float(reward)
+                cum_reward += reward_value
                 step_count += 1
 
                 # Only keep minimal step info to reduce memory usage
                 episode_steps.append(
-                    {"step": step_count, "reward": float(reward), "done": bool(done)}
+                    {"step": step_count, "reward": reward_value, "done": bool(done)}
                 )
 
                 # Log step data if logger is available
@@ -467,7 +468,7 @@ class RolloutWorker:
                     await episode_logger.log_step(
                         step=step_count,
                         action=action_arr,
-                        reward=float(reward),
+                        reward=reward_value,
                         done=done,
                         truncated=False,  # Add truncated detection if available
                         observations=observations,
@@ -476,11 +477,11 @@ class RolloutWorker:
 
                 if step_count % LOGGING_INTERVAL == 0:
                     logger.info(
-                        "Episode %d progress: %d/%d steps, latest_reward=%.3f",
+                        "Episode %d progress: %d/%d steps, cum_reward=%.3f",
                         episode_id,
                         step_count,
                         max_steps,
-                        final_reward,
+                        cum_reward,
                     )
 
             except Exception:
@@ -496,7 +497,7 @@ class RolloutWorker:
         episode_result = EpisodeResult(
             episode_id=episode_id,
             env_spec=env_spec,
-            reward=final_reward,
+            reward=cum_reward,
             steps=step_count,
             success=success,
             info={"duration": episode_duration},  # Removed episode_steps to save memory
@@ -510,16 +511,19 @@ class RolloutWorker:
         # End episode logging if logger is available
         if episode_logger:
             await episode_logger.end_episode(
-                final_reward=final_reward,
+                final_reward=cum_reward,
                 success=success,
-                extra_metrics={"duration": episode_duration, "final_info": info},
+                extra_metrics={
+                    "duration": episode_duration,
+                    "final_info": info,
+                },
             )
 
         logger.info(
-            "Episode %d completed: steps=%d reward=%.2f success=%s",
+            "Episode %d completed: steps=%d cum_reward=%.2f success=%s",
             episode_id,
             step_count,
-            final_reward,
+            cum_reward,
             episode_result.success,
         )
         return episode_result
