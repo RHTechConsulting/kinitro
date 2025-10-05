@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Cap'n Proto RPC Client for Agent Interface
-Sends observations as Agent.Tensor (no pickle).
+Cap'n Proto RPC Client for Agent Interface.
+
+Sends observations as a structured Observation message comprised of Tensor entries
+so we can transmit both state vectors and image data without relying on pickle.
 Handles promise vs coroutine returns, timeouts, and traversal limit.
 """
 
 import asyncio
 import logging
 import os
+from typing import Any
 
 import capnp
 import numpy as np
@@ -21,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentClient:
-    """Client for connecting to Agent RPC server. Sends observations as Tensor struct."""
+    """Client for connecting to Agent RPC server using Observation/Tensor structs."""
 
     def __init__(self, host="localhost", port=8000):
         self.address = host
@@ -63,39 +66,61 @@ class AgentClient:
             coro = maybe_promise
         return await asyncio.wait_for(coro, timeout=timeout)
 
-    def _obs_to_tensor_struct(self, obs: np.ndarray):
-        """Convert a numpy array observation to a Capnp Tensor struct (client-side builder)."""
-        if (
-            not hasattr(obs, "tobytes")
-            or not hasattr(obs, "shape")
-            or not hasattr(obs, "dtype")
-        ):
-            raise TypeError("Observation must be a numpy ndarray-like object")
-        msg = agent_capnp.Tensor.new_message()
-        msg.data = obs.tobytes()
-        msg.shape = [int(s) for s in obs.shape]
-        msg.dtype = str(obs.dtype)
-        return msg
+    def _to_numpy(self, value):
+        """Convert supported tensor-like values to contiguous numpy arrays."""
+        if isinstance(value, np.ndarray):
+            arr = value
+        elif isinstance(value, torch.Tensor):
+            arr = value.detach().cpu().numpy()
+        else:
+            arr = np.asarray(value)
 
-    async def act(self, obs: np.ndarray, timeout: float = 5.0) -> torch.Tensor:
+        if arr.dtype == np.object_:
+            raise TypeError("Cannot serialize object dtype observations")
+
+        return np.ascontiguousarray(arr)
+
+    def _encode_observation(self, obs):
+        """Convert an observation (array or dict of arrays) into capnp Observation struct."""
+        observation_msg = agent_capnp.Observation.new_message()
+
+        if isinstance(obs, dict):
+            entries = observation_msg.init("entries", len(obs))
+            for idx, (key, value) in enumerate(obs.items()):
+                tensor_builder = entries[idx].tensor
+                entries[idx].key = str(key)
+                array = self._to_numpy(value)
+                tensor_builder.data = array.tobytes()
+                tensor_builder.shape = [int(dim) for dim in array.shape]
+                tensor_builder.dtype = str(array.dtype)
+        else:
+            entries = observation_msg.init("entries", 1)
+            entries[0].key = "__value__"
+            array = self._to_numpy(obs)
+            tensor_builder = entries[0].tensor
+            tensor_builder.data = array.tobytes()
+            tensor_builder.shape = [int(dim) for dim in array.shape]
+            tensor_builder.dtype = str(array.dtype)
+
+        return observation_msg
+
+    async def act(self, obs: Any, timeout: float = 5.0) -> torch.Tensor:
         """
-        Send observation (numpy ndarray) to agent and receive action as torch.Tensor.
-        Uses Tensor struct for obs to avoid pickle.
+        Send observation (array or dict of arrays) to agent and receive action as torch.Tensor.
+        Uses Observation and Tensor structs to avoid pickle.
         """
         if self.agent is None:
             await self.connect()
 
-        # Build Tensor message for observation
+        # Build Observation message from provided payload
         try:
-            obs_msg = self._obs_to_tensor_struct(obs)
+            obs_msg = self._encode_observation(obs)
             logger.debug(
-                "AgentClient.act: sending obs shape=%s dtype=%s bytes=%d",
-                obs.shape,
-                obs.dtype,
-                obs.tobytes().__len__(),
+                "AgentClient.act: sending %d observation entries",
+                len(obs_msg.entries),
             )
         except Exception:
-            logger.exception("Failed to prepare observation tensor")
+            logger.exception("Failed to prepare observation payload")
             raise
 
         try:

@@ -59,7 +59,7 @@ class EnvSpec:
     enable_image_obs: bool = True
     image_size: tuple[int, int] = (64, 64)
     camera_attribute: str | None = "camera_name"
-    camera_names: tuple[str, ...] = ("topview", "corner3", "gripperPOV")
+    camera_names: tuple[str, ...] = ("corner",)
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.benchmark_name}/{self.env_name}"
@@ -128,15 +128,15 @@ class BenchmarkSpec:
     enable_image_obs: bool = True
     image_size: tuple[int, int] = (64, 64)
     camera_attribute: str | None = "camera_name"
-    camera_names: tuple[str, ...] = ("topview", "corner3", "gripperPOV")
+    camera_names: tuple[str, ...] = ("corner",)
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.benchmark_name}"
 
 
-class MultiViewImageObsWrapper(ObservationWrapper):
+class MetaworldObsWrapper(ObservationWrapper):
     """
-    Generic observation wrapper that augments observations with rendered images.
+    Observation wrapper for metaworld that augments observations with rendered images
 
     Behavior:
       - Always returns a Dict observation with key "base" holding the original
@@ -155,7 +155,7 @@ class MultiViewImageObsWrapper(ObservationWrapper):
         env: gym.Env,
         image_size: tuple[int, int] = (64, 64),
         camera_attribute: str | None = "camera_name",
-        camera_names: tuple[str, ...] = ("topview", "corner3", "gripperPOV"),
+        camera_names: tuple[str, ...] = ("corner",),
         save_images: bool = False,
         image_save_dir: str | None = None,
         submission_id: str | None = None,
@@ -202,22 +202,13 @@ class MultiViewImageObsWrapper(ObservationWrapper):
             dtype=np.uint8,
         )
 
+        # TODO: replace base with "observation.state"
         space_dict: dict[str, Box | gym.spaces.Space] = {"base": env.observation_space}
         for idx in range(num_views):
             key = "observation.image" if idx == 0 else f"observation.image{idx + 1}"
             space_dict[key] = image_box
 
         self.observation_space = DictSpace(space_dict)
-
-    def _set_camera_if_possible(self, name: str | None) -> None:
-        if self._camera_attribute is None or name is None:
-            return
-        try:
-            if hasattr(self.env, self._camera_attribute):
-                setattr(self.env, self._camera_attribute, name)
-        except Exception:
-            # Best-effort; ignore if env does not support dynamic camera switching
-            pass
 
     def _render_rgb_array(self) -> np.ndarray:
         # Expect HWC uint8 output from env.render()
@@ -248,30 +239,9 @@ class MultiViewImageObsWrapper(ObservationWrapper):
         images_hwc: list[np.ndarray] = []
         camera_names_used: list[str] = []
 
-        if (
-            self._camera_attribute is not None
-            and hasattr(self.env, self._camera_attribute)
-            and len(self._camera_names) > 0
-        ):
-            # Save current camera to restore later
-            try:
-                current_cam = getattr(self.env, self._camera_attribute)
-            except Exception:
-                current_cam = None
-
-            for cam in self._camera_names:
-                self._set_camera_if_possible(cam)
-                img = self._render_rgb_array()
-                images_hwc.append(img)
-                camera_names_used.append(cam)
-
-            # Restore original camera
-            self._set_camera_if_possible(current_cam)
-        else:
-            # Single-view capture without camera switching
-            img = self._render_rgb_array()
-            images_hwc.append(img)
-            camera_names_used.append("default")
+        img = self._render_rgb_array()
+        images_hwc.append(img)
+        camera_names_used.append("default")
 
         # Save images to disk if enabled
         if self._save_images and self._image_save_dir:
@@ -279,15 +249,35 @@ class MultiViewImageObsWrapper(ObservationWrapper):
 
         return images_hwc, camera_names_used
 
-    def observation(self, obs):  # type: ignore[override]
+    def observation(self, obs) -> Dict[str, Any]:
         # For now, return base observation directly to avoid RPC message size limits
         # The capture_and_save_images method can be called separately when needed
 
         # Increment step counter
         self._step_count += 1
 
+        # The only information we send to the agent is the first 4 elements of the environment state:
+        # - 0:2: XYZ coordinates of the end-effector
+        # - 3: gripper open/close state
+        new_obs: Dict[str, Any] = {"state": obs[:4]}
+
+        for camera in self._camera_names:
+            print(f"[OBS_CAM] Capturing image from camera: {camera}")
+            img = self._render_rgb_array()
+            # Convert HWC to CHW
+            img_chw = np.transpose(img, (2, 0, 1))
+            # TODO: we flip the image because it is upside down for some reason
+            # this appears to be something to do with metaworld/mujoco rendering? look more into it
+            img_chw = np.flip(img_chw, axis=1)
+            key = (
+                "observation.image"
+                if camera == self._camera_names[0]
+                else f"observation.image{self._camera_names.index(camera) + 1}"
+            )
+            new_obs[key] = img_chw
+
         # Return the original observation to avoid serialization issues
-        return obs
+        return new_obs
 
     def _save_images_to_disk(
         self, images_hwc: list[np.ndarray], camera_names: list[str]
@@ -496,52 +486,20 @@ class EnvManager:
     def make_env(
         self,
         env_spec: EnvSpec,
-        save_images: bool = False,
         submission_id: str | None = None,
+        save_images: bool = False,  # TODO: keep or move/remove?
     ) -> gym.Env:
         """Create an environment for a specific environment spec."""
         if env_spec.provider == "metaworld":
-            env = self._make_metaworld_env(env_spec)
+            env = self._make_metaworld_env(env_spec, submission_id, save_images)
         else:
             raise ValueError(f"Unsupported environment provider: {env_spec.provider}")
 
-        # Apply wrappers based on env_spec configuration
-        # Apply image observation wrapper if requested
-        effective_render_mode = env_spec.render_mode
-        if effective_render_mode == "human":
-            effective_render_mode = "rgb_array"
-
-        logger.debug(
-            f"Debug wrapper conditions: enable_image_obs={env_spec.enable_image_obs}, effective_render_mode={effective_render_mode}, render_mode={env_spec.render_mode}"
-        )
-
-        if (
-            env_spec.enable_image_obs
-            and effective_render_mode == "rgb_array"
-            and env_spec.render_mode != "human"
-        ):
-            logger.debug("Applying MultiViewImageObsWrapper")
-            env = MultiViewImageObsWrapper(
-                env,
-                image_size=env_spec.image_size,
-                camera_attribute=env_spec.camera_attribute,
-                camera_names=env_spec.camera_names,
-                save_images=save_images,
-                image_save_dir="data" if save_images else None,
-                submission_id=submission_id,
-            )
-        else:
-            logger.warning("NOT applying MultiViewImageObsWrapper - conditions not met")
-
-        # Optional human display wrapper if user requested human rendering
-        if env_spec.render_mode == "human":
-            env = HumanRendering(env)
-
-        env = gym.wrappers.TimeLimit(env, max_episode_steps=env_spec.max_episode_steps)
-
         return env
 
-    def _make_metaworld_env(self, env_spec: EnvSpec) -> gym.Env:
+    def _make_metaworld_env(
+        self, env_spec: EnvSpec, submission_id: str | None, save_images: bool
+    ) -> gym.Env:
         """Create a MetaWorld environment for the specified environment spec."""
         config = env_spec.config
         benchmark = env_spec.benchmark_name
@@ -550,10 +508,13 @@ class EnvManager:
         # Use appropriate render mode - None for headless, rgb_array for rendering
         render_mode = env_spec.render_mode if env_spec.enable_image_obs else None
 
+        # TODO: hardcoded camera_name to avoid issues
         if benchmark == "MT1":
             # For MT1, create a single-task environment
             mt1 = metaworld.MT1(env_name)
-            env = mt1.train_classes[env_name](render_mode=render_mode)
+            env = mt1.train_classes[env_name](
+                render_mode=render_mode, camera_name="corner"
+            )
             # Use the specific task from the config
             task = config["task_data"]
             env.set_task(task)
@@ -568,7 +529,9 @@ class EnvManager:
                 mt_benchmark = metaworld.MT50()
 
             env_cls = mt_benchmark.train_classes[env_name]
-            env = env_cls(render_mode=render_mode)
+            env = env_cls(
+                render_mode=render_mode, camera_name="corner"
+            )  # TODO: hardcoded camera_name to avoid issues
             # Use the specific task from the config
             task = config["task_data"]
             env.set_task(task)
@@ -577,13 +540,49 @@ class EnvManager:
             # For ML10, use test_classes and test_tasks
             ml10 = metaworld.ML10()
             env_cls = ml10.test_classes[env_name]
-            env = env_cls(render_mode=render_mode)
+            env = env_cls(
+                render_mode=render_mode, camera_name="corner"
+            )  # TODO: hardcoded camera_name to avoid issues
             # Use the specific task from the config
             task = config["task_data"]
             env.set_task(task)
 
         else:
             raise ValueError(f"Unsupported MetaWorld benchmark: {benchmark}")
+
+        # Apply wrappers based on env_spec configuration
+        # Apply image observation wrapper if requested
+        effective_render_mode = env_spec.render_mode
+        if effective_render_mode == "human":
+            effective_render_mode = "rgb_array"
+
+        logger.debug(
+            f"Debug wrapper conditions: enable_image_obs={env_spec.enable_image_obs}, effective_render_mode={effective_render_mode}, render_mode={env_spec.render_mode}"
+        )
+
+        # if (
+        #     # env_spec.enable_image_obs
+        #     if effective_render_mode == "rgb_array"
+        #     and env_spec.render_mode != "human"
+        # ):
+        logger.debug("Applying MetaworldObsWrapper")
+        env = MetaworldObsWrapper(
+            env,
+            image_size=env_spec.image_size,
+            camera_attribute=env_spec.camera_attribute,
+            camera_names=env_spec.camera_names,
+            save_images=save_images,
+            image_save_dir="data" if save_images else None,
+            submission_id=submission_id,
+        )
+        # else:
+        #     logger.warning("NOT applying MetaworldObsWrapper - conditions not met")
+
+        # Optional human display wrapper if user requested human rendering
+        if env_spec.render_mode == "human":
+            env = HumanRendering(env)
+
+        env = gym.wrappers.TimeLimit(env, max_episode_steps=env_spec.max_episode_steps)
 
         return env
 

@@ -4,7 +4,6 @@ from enum import Enum
 from typing import Any, Optional
 
 import capnp
-import numpy as np
 import torch
 from ray.util.queue import Queue
 from snowflake import SnowflakeGenerator
@@ -53,10 +52,8 @@ class RPCRequest:
         )
 
     @classmethod
-    def create_act(
-        cls, obs: np.ndarray, timeout: float = DEFAULT_RPC_TIMEOUT
-    ) -> "RPCRequest":
-        """Create an act request with observation"""
+    def create_act(cls, obs: Any, timeout: float = DEFAULT_RPC_TIMEOUT) -> "RPCRequest":
+        """Create an act request with observation payload (array or dict)."""
         return cls(
             method=RPCMethod.ACT,
             request_id=str(next(SnowflakeGenerator(42))),
