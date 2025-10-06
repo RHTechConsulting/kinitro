@@ -82,6 +82,7 @@ class RolloutCluster:
         logger.info(f"Completed cleanup of all workers in cluster {self.name}")
 
 
+# TODO: somehow tune resource limits as needed
 @ray.remote(
     max_restarts=1, max_task_retries=0, memory=2 * 1024 * 1024 * 1024
 )  # 2GB memory limit per worker
@@ -265,9 +266,7 @@ class RolloutWorker:
     async def run_env(
         self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue
     ) -> EnvResult:
-        env = self.env_manager.make_env(
-            env_spec, save_images=False, submission_id=str(self.submission_id)
-        )
+        env = self.env_manager.make_env(env_spec, submission_id=str(self.submission_id))
 
         # Get parameters from env_spec (which now contains them)
         episodes_per_task = env_spec.episodes_per_task

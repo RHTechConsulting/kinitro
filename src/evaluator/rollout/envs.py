@@ -19,13 +19,11 @@ import numpy as np
 from gymnasium import ObservationWrapper
 from gymnasium.spaces import Box
 from gymnasium.spaces import Dict as DictSpace
-from gymnasium.wrappers import HumanRendering
+from metaworld.wrappers import OneHotWrapper
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Constant ripped from lerobot.constants
-OBS_IMAGES = "observation.images"
 DEFAULT_MAX_EPISODE_STEPS = 10
 DEFAULT_EPISODES_PER_TASK = 3
 
@@ -57,7 +55,6 @@ class EnvSpec:
 
     # Observation capture options
     enable_image_obs: bool = True
-    image_size: tuple[int, int] = (64, 64)
     camera_attribute: str | None = "camera_name"
     camera_names: tuple[str, ...] = ("corner",)
 
@@ -126,7 +123,6 @@ class BenchmarkSpec:
 
     # Observation capture options
     enable_image_obs: bool = True
-    image_size: tuple[int, int] = (64, 64)
     camera_attribute: str | None = "camera_name"
     camera_names: tuple[str, ...] = ("corner",)
 
@@ -153,7 +149,6 @@ class MetaworldObsWrapper(ObservationWrapper):
     def __init__(
         self,
         env: gym.Env,
-        image_size: tuple[int, int] = (64, 64),
         camera_attribute: str | None = "camera_name",
         camera_names: tuple[str, ...] = ("corner",),
         save_images: bool = False,
@@ -161,7 +156,6 @@ class MetaworldObsWrapper(ObservationWrapper):
         submission_id: str | None = None,
     ):
         super().__init__(env)
-        self._img_h, self._img_w = int(image_size[0]), int(image_size[1])
         self._camera_attribute = camera_attribute
         self._camera_names = tuple(camera_names) if camera_names else tuple()
 
@@ -194,16 +188,28 @@ class MetaworldObsWrapper(ObservationWrapper):
         )
         num_views = len(self._camera_names) if can_switch_cameras else 1
 
+        # Determine render dimensions from the base (unwrapped) env, falling back to a safe default
+        base_env = getattr(env, "unwrapped", env)
+        render_width = getattr(base_env, "width", None)
+        render_height = getattr(base_env, "height", None)
+
+        # Cache for later fallback usage
+        self._render_width = int(render_width)
+        self._render_height = int(render_height)
+
         # Build observation space dynamically based on number of views requested
         image_box = Box(
             low=0,
             high=255,
-            shape=(3, self._img_h, self._img_w),
+            # Use cached render dimensions from the base env
+            shape=(3, self._render_height, self._render_width),
             dtype=np.uint8,
         )
 
         # TODO: replace base with "observation.state"
-        space_dict: dict[str, Box | gym.spaces.Space] = {"base": env.observation_space}
+        space_dict: dict[str, Box | gym.spaces.Space] = {
+            "observation.state": env.observation_space
+        }
         for idx in range(num_views):
             key = "observation.image" if idx == 0 else f"observation.image{idx + 1}"
             space_dict[key] = image_box
@@ -220,12 +226,16 @@ class MetaworldObsWrapper(ObservationWrapper):
                 logger.warning(
                     "Environment render returned None, using fallback black image"
                 )
-                return np.zeros((self._img_h, self._img_w, 3), dtype=np.uint8)
+                return np.zeros(
+                    (self._render_height, self._render_width, 3), dtype=np.uint8
+                )
         except Exception as e:
             logger.warning(
                 f"Failed to render environment: {e}, using fallback black image"
             )
-            return np.zeros((self._img_h, self._img_w, 3), dtype=np.uint8)
+            return np.zeros(
+                (self._render_height, self._render_width, 3), dtype=np.uint8
+            )
 
         return np.asarray(frame)
 
@@ -256,10 +266,16 @@ class MetaworldObsWrapper(ObservationWrapper):
         # Increment step counter
         self._step_count += 1
 
-        # The only information we send to the agent is the first 4 elements of the environment state:
+        # The only information we send to the agent are:
         # - 0:2: XYZ coordinates of the end-effector
         # - 3: gripper open/close state
-        new_obs: Dict[str, Any] = {"state": obs[:4]}
+        # - 39:n: one hot vector indicating the task
+        # and an image from one or more cameras
+        state = obs[:4]
+        # one hot vector indicating the task
+        one_hot = obs[39:]
+        obs = np.concatenate([state, one_hot])
+        new_obs: Dict[str, Any] = {"observation.state": obs}
 
         for camera in self._camera_names:
             print(f"[OBS_CAM] Capturing image from camera: {camera}")
@@ -311,7 +327,6 @@ class EnvManager:
     """Manager for creating environments and discovering tasks."""
 
     def __init__(self):
-        self._metaworld_cache = {}
         # Configure headless rendering on initialization
         configure_headless_rendering()
 
@@ -355,7 +370,6 @@ class EnvManager:
                     ),
                     render_mode=benchmark_spec.render_mode,
                     enable_image_obs=benchmark_spec.enable_image_obs,
-                    image_size=benchmark_spec.image_size,
                     camera_attribute=benchmark_spec.camera_attribute,
                     camera_names=benchmark_spec.camera_names,
                 )
@@ -383,7 +397,6 @@ class EnvManager:
                         ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
-                        image_size=benchmark_spec.image_size,
                         camera_attribute=benchmark_spec.camera_attribute,
                         camera_names=benchmark_spec.camera_names,
                     )
@@ -411,7 +424,6 @@ class EnvManager:
                         ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
-                        image_size=benchmark_spec.image_size,
                         camera_attribute=benchmark_spec.camera_attribute,
                         camera_names=benchmark_spec.camera_names,
                     )
@@ -439,7 +451,6 @@ class EnvManager:
                         ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
-                        image_size=benchmark_spec.image_size,
                         camera_attribute=benchmark_spec.camera_attribute,
                         camera_names=benchmark_spec.camera_names,
                     )
@@ -467,7 +478,6 @@ class EnvManager:
                         ),
                         render_mode=benchmark_spec.render_mode,
                         enable_image_obs=benchmark_spec.enable_image_obs,
-                        image_size=benchmark_spec.image_size,
                         camera_attribute=benchmark_spec.camera_attribute,
                         camera_names=benchmark_spec.camera_names,
                     )
@@ -497,6 +507,7 @@ class EnvManager:
 
         return env
 
+    # TODO: remove this method?
     def _make_metaworld_env(
         self, env_spec: EnvSpec, submission_id: str | None, save_images: bool
     ) -> gym.Env:
@@ -519,6 +530,12 @@ class EnvManager:
             task = config["task_data"]
             env.set_task(task)
 
+            # One hot wrapper added here
+            for env_id, (name, env_cls) in enumerate(mt1.train_classes.items()):
+                if name == env_name:
+                    env = OneHotWrapper(env, env_id, len(mt1.train_classes))
+                    break
+
         elif benchmark in ["MT10", "MT25", "MT50"]:
             # For MT benchmarks, use train_classes since test_classes is empty
             if benchmark == "MT10":
@@ -536,6 +553,14 @@ class EnvManager:
             task = config["task_data"]
             env.set_task(task)
 
+            # One hot wrapper added here
+            for env_id, (name, env_cls) in enumerate(
+                mt_benchmark.train_classes.items()
+            ):
+                if name == env_name:
+                    env = OneHotWrapper(env, env_id, len(mt_benchmark.train_classes))
+                    break
+
         elif benchmark == "ML10":
             # For ML10, use test_classes and test_tasks
             ml10 = metaworld.ML10()
@@ -547,40 +572,24 @@ class EnvManager:
             task = config["task_data"]
             env.set_task(task)
 
+            # One hot wrapper added here
+            for env_id, (name, env_cls) in enumerate(ml10.test_classes.items()):
+                if name == env_name:
+                    env = OneHotWrapper(env, env_id, len(ml10.test_classes))
+                    break
+
         else:
             raise ValueError(f"Unsupported MetaWorld benchmark: {benchmark}")
 
-        # Apply wrappers based on env_spec configuration
-        # Apply image observation wrapper if requested
-        effective_render_mode = env_spec.render_mode
-        if effective_render_mode == "human":
-            effective_render_mode = "rgb_array"
-
-        logger.debug(
-            f"Debug wrapper conditions: enable_image_obs={env_spec.enable_image_obs}, effective_render_mode={effective_render_mode}, render_mode={env_spec.render_mode}"
-        )
-
-        # if (
-        #     # env_spec.enable_image_obs
-        #     if effective_render_mode == "rgb_array"
-        #     and env_spec.render_mode != "human"
-        # ):
         logger.debug("Applying MetaworldObsWrapper")
         env = MetaworldObsWrapper(
             env,
-            image_size=env_spec.image_size,
             camera_attribute=env_spec.camera_attribute,
             camera_names=env_spec.camera_names,
             save_images=save_images,
             image_save_dir="data" if save_images else None,
             submission_id=submission_id,
         )
-        # else:
-        #     logger.warning("NOT applying MetaworldObsWrapper - conditions not met")
-
-        # Optional human display wrapper if user requested human rendering
-        if env_spec.render_mode == "human":
-            env = HumanRendering(env)
 
         env = gym.wrappers.TimeLimit(env, max_episode_steps=env_spec.max_episode_steps)
 
