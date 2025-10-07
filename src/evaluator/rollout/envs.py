@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Dict, List, TypedDict
 
 import gymnasium as gym
-import metaworld
 import numpy as np
 from gymnasium import ObservationWrapper
 from gymnasium.spaces import Box
@@ -22,10 +21,13 @@ from gymnasium.spaces import Dict as DictSpace
 from metaworld.wrappers import OneHotWrapper
 from PIL import Image
 
+from ..providers.metaworld import load_benchmark_definition
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_EPISODE_STEPS = 10
 DEFAULT_EPISODES_PER_TASK = 3
+DEFAULT_TASKS_PER_ENV = 5
 
 
 def configure_headless_rendering():
@@ -54,7 +56,6 @@ class EnvSpec:
     render_mode: str | None = "rgb_array"
 
     # Observation capture options
-    enable_image_obs: bool = True
     camera_attribute: str | None = "camera_name"
     camera_names: tuple[str, ...] = ("corner",)
 
@@ -106,6 +107,8 @@ class BenchmarkConfig(TypedDict, total=False):
     env_name: str  # Name of environment from the benchmark
     episodes_per_task: int  # Number of episodes to run per task
     max_episode_steps: int  # Maximum steps per episode
+    tasks_per_env: int  # Number of task variants to sample per environment
+    task_seed: int  # Optional RNG seed for task generation
 
 
 @dataclass
@@ -122,9 +125,9 @@ class BenchmarkSpec:
     render_mode: str | None = "rgb_array"
 
     # Observation capture options
-    enable_image_obs: bool = True
-    camera_attribute: str | None = "camera_name"
+    # TODO: make these per-env-spec instead of per-benchmark-spec?
     camera_names: tuple[str, ...] = ("corner",)
+    camera_attribute: str | None = "camera_name"
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.benchmark_name}"
@@ -278,7 +281,6 @@ class MetaworldObsWrapper(ObservationWrapper):
         new_obs: Dict[str, Any] = {"observation.state": obs}
 
         for camera in self._camera_names:
-            print(f"[OBS_CAM] Capturing image from camera: {camera}")
             img = self._render_rgb_array()
             # Convert HWC to CHW
             img_chw = np.transpose(img, (2, 0, 1))
@@ -343,25 +345,59 @@ class EnvManager:
         self, benchmark_spec: BenchmarkSpec
     ) -> list[EnvSpec]:
         """Get all MetaWorld test environments and tasks for the specified benchmark."""
-        envs = []
+        tasks_per_env = int(
+            benchmark_spec.config.get("tasks_per_env", DEFAULT_TASKS_PER_ENV)
+        )
+        if tasks_per_env < 1:
+            raise ValueError("tasks_per_env must be >= 1")
 
-        if benchmark_spec.benchmark_name == "MT1":
-            # MT1 has train tasks only (no test tasks), so we use train_tasks for evaluation
-            # User must specify which environment when creating MT1
-            env_name = benchmark_spec.config.get("env_name")
-            if not env_name:
-                raise ValueError("MT1 requires 'env_name' in benchmark config")
+        task_seed = benchmark_spec.config.get("task_seed")
+        env_name_override = benchmark_spec.config.get("env_name")
 
-            mt1 = metaworld.MT1(env_name)
-            tasks = [task for task in mt1.train_tasks if task.env_name == env_name]
+        benchmark_data = load_benchmark_definition(
+            benchmark_spec.benchmark_name,
+            tasks_per_env=tasks_per_env,
+            env_name=env_name_override,
+            seed=task_seed,
+        )
 
-            for i, task in enumerate(tasks):
-                env = EnvSpec(
+        if benchmark_spec.benchmark_name in {"MT1", "MT10", "MT25", "MT50"}:
+            class_lookup = benchmark_data.train_classes
+            task_source = benchmark_data.train_tasks
+        elif benchmark_spec.benchmark_name in {"ML10", "ML25", "ML45"}:
+            class_lookup = benchmark_data.test_classes
+            task_source = benchmark_data.test_tasks
+        else:
+            raise ValueError(
+                f"Unsupported MetaWorld benchmark: {benchmark_spec.benchmark_name}"
+            )
+
+        env_specs: list[EnvSpec] = []
+        class_order = tuple(class_lookup.keys())
+
+        if env_name_override and env_name_override not in class_lookup:
+            raise ValueError(
+                f"Environment '{env_name_override}' not found in benchmark {benchmark_spec.benchmark_name}"
+            )
+
+        for env_id, env_name in enumerate(class_order):
+            if env_name_override and env_name != env_name_override:
+                continue
+
+            env_tasks = [task for task in task_source if task.env_name == env_name]
+
+            for task_idx, task in enumerate(env_tasks):
+                env_spec = EnvSpec(
                     env_name=env_name,
-                    benchmark_name="MT1",
+                    benchmark_name=benchmark_spec.benchmark_name,
                     provider="metaworld",
-                    config={"task_idx": i, "task_data": task},
-                    # Inherit settings from benchmark_spec config
+                    config={
+                        "task_idx": task_idx,
+                        "task_data": task,
+                        "env_cls": class_lookup[env_name],
+                        "env_id": env_id,
+                        "class_order": class_order,
+                    },
                     episodes_per_task=benchmark_spec.config.get(
                         "episodes_per_task", DEFAULT_EPISODES_PER_TASK
                     ),
@@ -369,129 +405,17 @@ class EnvManager:
                         "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
                     ),
                     render_mode=benchmark_spec.render_mode,
-                    enable_image_obs=benchmark_spec.enable_image_obs,
                     camera_attribute=benchmark_spec.camera_attribute,
                     camera_names=benchmark_spec.camera_names,
                 )
-                envs.append(env)
-
-        elif benchmark_spec.benchmark_name == "MT10":
-            # MT10 has train tasks only (no test tasks), so we use train_tasks for evaluation
-            mt10 = metaworld.MT10()
-
-            for env_name in mt10.train_classes.keys():
-                tasks = [task for task in mt10.train_tasks if task.env_name == env_name]
-
-                for i, task in enumerate(tasks):
-                    env = EnvSpec(
-                        env_name=env_name,
-                        benchmark_name="MT10",
-                        provider="metaworld",
-                        config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec config
-                        episodes_per_task=benchmark_spec.config.get(
-                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
-                        ),
-                        max_episode_steps=benchmark_spec.config.get(
-                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
-                        ),
-                        render_mode=benchmark_spec.render_mode,
-                        enable_image_obs=benchmark_spec.enable_image_obs,
-                        camera_attribute=benchmark_spec.camera_attribute,
-                        camera_names=benchmark_spec.camera_names,
-                    )
-                    envs.append(env)
-
-        elif benchmark_spec.benchmark_name == "MT25":
-            # MT25 has train tasks only (no test tasks), so we use train_tasks for evaluation
-            mt25 = metaworld.MT25()
-
-            for env_name in mt25.train_classes.keys():
-                tasks = [task for task in mt25.train_tasks if task.env_name == env_name]
-
-                for i, task in enumerate(tasks):
-                    env = EnvSpec(
-                        env_name=env_name,
-                        benchmark_name="MT25",
-                        provider="metaworld",
-                        config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec config
-                        episodes_per_task=benchmark_spec.config.get(
-                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
-                        ),
-                        max_episode_steps=benchmark_spec.config.get(
-                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
-                        ),
-                        render_mode=benchmark_spec.render_mode,
-                        enable_image_obs=benchmark_spec.enable_image_obs,
-                        camera_attribute=benchmark_spec.camera_attribute,
-                        camera_names=benchmark_spec.camera_names,
-                    )
-                    envs.append(env)
-
-        elif benchmark_spec.benchmark_name == "MT50":
-            # MT50 has train tasks only (no test tasks), so we use train_tasks for evaluation
-            mt50 = metaworld.MT50()
-
-            for env_name in mt50.train_classes.keys():
-                tasks = [task for task in mt50.train_tasks if task.env_name == env_name]
-
-                for i, task in enumerate(tasks):
-                    env = EnvSpec(
-                        env_name=env_name,
-                        benchmark_name="MT50",
-                        provider="metaworld",
-                        config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec config
-                        episodes_per_task=benchmark_spec.config.get(
-                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
-                        ),
-                        max_episode_steps=benchmark_spec.config.get(
-                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
-                        ),
-                        render_mode=benchmark_spec.render_mode,
-                        enable_image_obs=benchmark_spec.enable_image_obs,
-                        camera_attribute=benchmark_spec.camera_attribute,
-                        camera_names=benchmark_spec.camera_names,
-                    )
-                    envs.append(env)
-
-        elif benchmark_spec.benchmark_name == "ML10":
-            # ML10 has actual test tasks and test environments
-            ml10 = metaworld.ML10()
-
-            for env_name in ml10.test_classes.keys():
-                tasks = [task for task in ml10.test_tasks if task.env_name == env_name]
-
-                for i, task in enumerate(tasks):
-                    env = EnvSpec(
-                        env_name=env_name,
-                        benchmark_name="ML10",
-                        provider="metaworld",
-                        config={"task_idx": i, "task_data": task},
-                        # Inherit settings from benchmark_spec config
-                        episodes_per_task=benchmark_spec.config.get(
-                            "episodes_per_task", DEFAULT_EPISODES_PER_TASK
-                        ),
-                        max_episode_steps=benchmark_spec.config.get(
-                            "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS
-                        ),
-                        render_mode=benchmark_spec.render_mode,
-                        enable_image_obs=benchmark_spec.enable_image_obs,
-                        camera_attribute=benchmark_spec.camera_attribute,
-                        camera_names=benchmark_spec.camera_names,
-                    )
-                    envs.append(env)
-
-        else:
-            raise ValueError(
-                f"Unsupported MetaWorld benchmark: {benchmark_spec.benchmark_name}"
-            )
+                env_specs.append(env_spec)
 
         logger.info(
-            f"Found {len(envs)} test tasks across all environments for {benchmark_spec}"
+            "Found %d test tasks across all environments for %s",
+            len(env_specs),
+            benchmark_spec,
         )
-        return envs
+        return env_specs
 
     def make_env(
         self,
@@ -507,79 +431,27 @@ class EnvManager:
 
         return env
 
-    # TODO: remove this method?
     def _make_metaworld_env(
         self, env_spec: EnvSpec, submission_id: str | None, save_images: bool
     ) -> gym.Env:
         """Create a MetaWorld environment for the specified environment spec."""
         config = env_spec.config
-        benchmark = env_spec.benchmark_name
-        env_name = env_spec.env_name
+        env_cls = config.get("env_cls")
+        if env_cls is None:
+            raise ValueError("EnvSpec config missing 'env_cls' for MetaWorld env")
 
-        # Use appropriate render mode - None for headless, rgb_array for rendering
-        render_mode = env_spec.render_mode if env_spec.enable_image_obs else None
+        render_mode = env_spec.render_mode
+        env = env_cls(render_mode=render_mode, camera_name="corner")
 
-        # TODO: hardcoded camera_name to avoid issues
-        if benchmark == "MT1":
-            # For MT1, create a single-task environment
-            mt1 = metaworld.MT1(env_name)
-            env = mt1.train_classes[env_name](
-                render_mode=render_mode, camera_name="corner"
-            )
-            # Use the specific task from the config
-            task = config["task_data"]
-            env.set_task(task)
+        task = config.get("task_data")
+        if task is None:
+            raise ValueError("EnvSpec config missing 'task_data' for MetaWorld env")
+        env.set_task(task)
 
-            # One hot wrapper added here
-            for env_id, (name, env_cls) in enumerate(mt1.train_classes.items()):
-                if name == env_name:
-                    env = OneHotWrapper(env, env_id, len(mt1.train_classes))
-                    break
-
-        elif benchmark in ["MT10", "MT25", "MT50"]:
-            # For MT benchmarks, use train_classes since test_classes is empty
-            if benchmark == "MT10":
-                mt_benchmark = metaworld.MT10()
-            elif benchmark == "MT25":
-                mt_benchmark = metaworld.MT25()
-            else:  # MT50
-                mt_benchmark = metaworld.MT50()
-
-            env_cls = mt_benchmark.train_classes[env_name]
-            env = env_cls(
-                render_mode=render_mode, camera_name="corner"
-            )  # TODO: hardcoded camera_name to avoid issues
-            # Use the specific task from the config
-            task = config["task_data"]
-            env.set_task(task)
-
-            # One hot wrapper added here
-            for env_id, (name, env_cls) in enumerate(
-                mt_benchmark.train_classes.items()
-            ):
-                if name == env_name:
-                    env = OneHotWrapper(env, env_id, len(mt_benchmark.train_classes))
-                    break
-
-        elif benchmark == "ML10":
-            # For ML10, use test_classes and test_tasks
-            ml10 = metaworld.ML10()
-            env_cls = ml10.test_classes[env_name]
-            env = env_cls(
-                render_mode=render_mode, camera_name="corner"
-            )  # TODO: hardcoded camera_name to avoid issues
-            # Use the specific task from the config
-            task = config["task_data"]
-            env.set_task(task)
-
-            # One hot wrapper added here
-            for env_id, (name, env_cls) in enumerate(ml10.test_classes.items()):
-                if name == env_name:
-                    env = OneHotWrapper(env, env_id, len(ml10.test_classes))
-                    break
-
-        else:
-            raise ValueError(f"Unsupported MetaWorld benchmark: {benchmark}")
+        class_order: tuple[str, ...] | tuple[()] = config.get("class_order", tuple())
+        env_id = config.get("env_id")
+        if class_order and env_id is not None:
+            env = OneHotWrapper(env, env_id, len(class_order))
 
         logger.debug("Applying MetaworldObsWrapper")
         env = MetaworldObsWrapper(

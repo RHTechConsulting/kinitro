@@ -181,7 +181,6 @@ class Orchestrator:
             provider=eval_job_msg.env_provider,
             benchmark_name=eval_job_msg.benchmark_name,
             config=eval_job_msg.config,
-            enable_image_obs=True,
             render_mode="rgb_array",
         )
 

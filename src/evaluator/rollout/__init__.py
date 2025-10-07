@@ -123,6 +123,7 @@ class RolloutWorker:
         self.r2_config = r2_config
         self.database_url = database_url
         self.episode_loggers: Dict[str, EpisodeLogger] = {}
+        self._global_episode_counter = 1
 
     def cleanup(self):
         """Clean up resources held by this worker."""
@@ -196,6 +197,7 @@ class RolloutWorker:
                 raise ValueError("Submission container address not set")
 
             self.eval_start = time.time()
+            self._global_episode_counter = 1
 
             all_task_specs = []
             for benchmark_spec in self.benchmark_specs:
@@ -300,7 +302,9 @@ class RolloutWorker:
         self.episode_loggers[env_key] = episode_logger
 
         episodes = []
-        for episode_id in range(episodes_per_task):
+        for episode_iter in range(episodes_per_task):
+            episode_id = self._global_episode_counter
+            self._global_episode_counter += 1
             try:
                 episode_result = await self.run_episode(
                     env,
@@ -313,7 +317,13 @@ class RolloutWorker:
                 )
                 episodes.append(episode_result)
             except Exception:
-                logger.exception("Failed episode %d for %s", episode_id, env_spec)
+                logger.exception(
+                    "Failed episode %d (iteration %d/%d) for %s",
+                    episode_id,
+                    episode_iter + 1,
+                    episodes_per_task,
+                    env_spec,
+                )
                 continue
 
         env.close()

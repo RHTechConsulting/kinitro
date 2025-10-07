@@ -277,6 +277,27 @@ class EpisodeLogger:
         else:
             return {"type": "scalar", "value": action}
 
+    def _to_serializable(self, value: Any) -> Any:
+        """Recursively normalize common numpy/pydantic types for JSON."""
+
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {str(key): self._to_serializable(val) for key, val in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [self._to_serializable(item) for item in value]
+        if hasattr(value, "model_dump"):
+            return self._to_serializable(value.model_dump())
+        if hasattr(value, "__dict__"):
+            return self._to_serializable(vars(value))
+        return str(value)
+
     def _upload_observations_sync(
         self,
         observations: List[Tuple[np.ndarray, str]],
@@ -547,6 +568,11 @@ class EpisodeLogger:
             ].isoformat()
             episode_data_copy["end_time"] = episode_data_copy["end_time"].isoformat()
 
+            episode_data_copy = {
+                key: self._to_serializable(value)
+                for key, value in episode_data_copy.items()
+            }
+
             # Create message
             episode_msg = EpisodeDataMessage(**episode_data_copy)
             message_json = episode_msg.model_dump_json()
@@ -590,6 +616,11 @@ class EpisodeLogger:
 
             # Remove the original timestamp key since we renamed it
             del step_data_copy["timestamp"]
+
+            step_data_copy = {
+                key: self._to_serializable(value)
+                for key, value in step_data_copy.items()
+            }
 
             # Create message
             step_msg = EpisodeStepDataMessage(**step_data_copy)
