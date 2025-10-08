@@ -47,8 +47,8 @@ from core.messages import (
     EpisodeDataMessage,
     EpisodeStepDataMessage,
     EvalResultMessage,
-    JobStatusUpdateMessage,
     EventType,
+    JobStatusUpdateMessage,
     MessageType,
 )
 
