@@ -29,6 +29,10 @@ DEFAULT_MAX_EPISODE_STEPS = 10
 DEFAULT_EPISODES_PER_TASK = 3
 DEFAULT_TASKS_PER_ENV = 5
 
+# Metaworld observation wrapper constants
+OBS_STATE_IDX_END = 4
+OBS_TASK_ONE_HOT_START_IDX = 39
+
 
 def configure_headless_rendering():
     """Configure environment variables for headless MuJoCo rendering using EGL."""
@@ -57,7 +61,7 @@ class EnvSpec:
 
     # Observation capture options
     camera_attribute: str | None = "camera_name"
-    camera_names: tuple[str, ...] = ("corner",)
+    camera_names: tuple[str, ...] = "corner"
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.benchmark_name}/{self.env_name}"
@@ -126,7 +130,7 @@ class BenchmarkSpec:
 
     # Observation capture options
     # TODO: make these per-env-spec instead of per-benchmark-spec?
-    camera_names: tuple[str, ...] = ("corner",)
+    camera_names: tuple[str, ...] = "corner"
     camera_attribute: str | None = "camera_name"
 
     def __str__(self) -> str:
@@ -153,7 +157,7 @@ class MetaworldObsWrapper(ObservationWrapper):
         self,
         env: gym.Env,
         camera_attribute: str | None = "camera_name",
-        camera_names: tuple[str, ...] = ("corner",),
+        camera_names: tuple[str, ...] = ("corner"),
         save_images: bool = False,
         image_save_dir: str | None = None,
         submission_id: str | None = None,
@@ -263,10 +267,6 @@ class MetaworldObsWrapper(ObservationWrapper):
         return images_hwc, camera_names_used
 
     def observation(self, obs) -> Dict[str, Any]:
-        # For now, return base observation directly to avoid RPC message size limits
-        # The capture_and_save_images method can be called separately when needed
-
-        # Increment step counter
         self._step_count += 1
 
         # The only information we send to the agent are:
@@ -274,9 +274,9 @@ class MetaworldObsWrapper(ObservationWrapper):
         # - 3: gripper open/close state
         # - 39:n: one hot vector indicating the task
         # and an image from one or more cameras
-        state = obs[:4]
+        state = obs[:OBS_STATE_IDX_END]
         # one hot vector indicating the task
-        one_hot = obs[39:]
+        one_hot = obs[OBS_TASK_ONE_HOT_START_IDX:]
         obs = np.concatenate([state, one_hot])
         new_obs: Dict[str, Any] = {"observation.state": obs}
 
@@ -294,7 +294,6 @@ class MetaworldObsWrapper(ObservationWrapper):
             )
             new_obs[key] = img_chw
 
-        # Return the original observation to avoid serialization issues
         return new_obs
 
     def _save_images_to_disk(

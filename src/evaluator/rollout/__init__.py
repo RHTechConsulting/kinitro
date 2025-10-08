@@ -13,7 +13,7 @@ from core.db.models import SnowflakeId
 from core.log import get_logger
 from core.storage import R2Config
 
-from ..rpc.rpc_process import RPCRequest
+from ..rpc.rpc_process import PGQ_TIMEOUT, RPCRequest
 from .envs import BenchmarkSpec, EnvManager, EnvResult, EnvSpec, EpisodeResult
 from .episode_logger import EpisodeLogger, LoggingConfig
 
@@ -138,7 +138,7 @@ class RolloutWorker:
                         try:
                             env.close()
                         except Exception:
-                            pass
+                            logger.warning("Failed to close env during cleanup")
                     self.env_manager.envs.clear() if hasattr(
                         self.env_manager, "envs"
                     ) else None
@@ -171,10 +171,10 @@ class RolloutWorker:
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
-        await send_queue.put_async(rpc_msg)
+        await send_queue.put_async(rpc_msg, timeout=PGQ_TIMEOUT)
         while True:
             try:
-                resp = await recv_queue.get_async()
+                resp = await recv_queue.get_async(timeout=PGQ_TIMEOUT)
                 print(
                     f"[Worker {self.rollout_worker_id}] RPC test ping response={resp}"
                 )
@@ -254,7 +254,7 @@ class RolloutWorker:
                             if hasattr(episode, "clear"):
                                 episode.clear()
                 except Exception:
-                    pass
+                    logger.warning("Failed to clear episode data in task results")
 
             return task_results
 
@@ -472,8 +472,8 @@ class RolloutWorker:
                 obs_payload = _normalize_for_rpc(observation)
 
                 rpc_msg = RPCRequest.create_act(obs_payload)
-                await send_queue.put_async(rpc_msg)
-                resp = await recv_queue.get_async()
+                await send_queue.put_async(rpc_msg, timeout=PGQ_TIMEOUT)
+                resp = await recv_queue.get_async(timeout=PGQ_TIMEOUT)
                 action_tensor = resp.result
                 if isinstance(action_tensor, torch.Tensor):
                     action_arr = action_tensor.detach().cpu().numpy()
