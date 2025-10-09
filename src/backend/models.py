@@ -5,6 +5,7 @@ SQLModel models for Kinitro Backend database.
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from pydantic import field_validator
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
@@ -23,14 +24,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.sql import func
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
-from pydantic import field_validator
 
 from backend.constants import (
     DEFAULT_MIN_AVG_REWARD,
     DEFAULT_MIN_SUCCESS_RATE,
     DEFAULT_WIN_MARGIN_PCT,
 )
-from core.db.models import EvaluationStatus, SnowflakeId, TimestampMixin
+from core.db.models import EvaluationStatus, TimestampMixin
 
 # Type aliases for consistency
 SS58Address = str  # Will be constrained to 48 chars in field definition

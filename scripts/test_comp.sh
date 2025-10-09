@@ -20,16 +20,16 @@ curl -X POST "$BACKEND_URL/competitions" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ADMIN_API_KEY" \
   -d '{
-    "name": "test",
-    "description": "MetaWorld MT1 test competition",
+    "name": "MT10-baby",
+    "description": "MetaWorld MT10 test competition",
     "benchmarks": [
         {
             "provider": "metaworld",
-            "benchmark_name": "MT1",
+            "benchmark_name": "MT10",
             "config": {
-                "env_name": "reach-v3",
                 "episodes_per_task": 1,
-                "max_episode_steps": 200
+                "max_episode_steps": 50,
+                "tasks_per_env": 2
             }
         }
     ],

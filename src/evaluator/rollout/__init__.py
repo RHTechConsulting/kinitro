@@ -13,7 +13,7 @@ from core.db.models import SnowflakeId
 from core.log import get_logger
 from core.storage import R2Config
 
-from ..rpc.rpc_process import RPCRequest
+from ..rpc.rpc_process import PGQ_TIMEOUT, RPCRequest
 from .envs import BenchmarkSpec, EnvManager, EnvResult, EnvSpec, EpisodeResult
 from .episode_logger import EpisodeLogger, LoggingConfig
 
@@ -82,6 +82,7 @@ class RolloutCluster:
         logger.info(f"Completed cleanup of all workers in cluster {self.name}")
 
 
+# TODO: somehow tune resource limits as needed
 @ray.remote(
     max_restarts=1, max_task_retries=0, memory=2 * 1024 * 1024 * 1024
 )  # 2GB memory limit per worker
@@ -122,6 +123,7 @@ class RolloutWorker:
         self.r2_config = r2_config
         self.database_url = database_url
         self.episode_loggers: Dict[str, EpisodeLogger] = {}
+        self._global_episode_counter = 1
 
     def cleanup(self):
         """Clean up resources held by this worker."""
@@ -136,7 +138,7 @@ class RolloutWorker:
                         try:
                             env.close()
                         except Exception:
-                            pass
+                            logger.warning("Failed to close env during cleanup")
                     self.env_manager.envs.clear() if hasattr(
                         self.env_manager, "envs"
                     ) else None
@@ -169,10 +171,10 @@ class RolloutWorker:
 
     async def test_rpc(self, send_queue: Queue, recv_queue: Queue):
         rpc_msg = RPCRequest.create_ping("ray-ping")
-        await send_queue.put_async(rpc_msg)
+        await send_queue.put_async(rpc_msg, timeout=PGQ_TIMEOUT)
         while True:
             try:
-                resp = await recv_queue.get_async()
+                resp = await recv_queue.get_async(timeout=PGQ_TIMEOUT)
                 print(
                     f"[Worker {self.rollout_worker_id}] RPC test ping response={resp}"
                 )
@@ -195,6 +197,7 @@ class RolloutWorker:
                 raise ValueError("Submission container address not set")
 
             self.eval_start = time.time()
+            self._global_episode_counter = 1
 
             all_task_specs = []
             for benchmark_spec in self.benchmark_specs:
@@ -251,7 +254,7 @@ class RolloutWorker:
                             if hasattr(episode, "clear"):
                                 episode.clear()
                 except Exception:
-                    pass
+                    logger.warning("Failed to clear episode data in task results")
 
             return task_results
 
@@ -265,9 +268,7 @@ class RolloutWorker:
     async def run_env(
         self, env_spec: EnvSpec, send_queue: Queue, recv_queue: Queue
     ) -> EnvResult:
-        env = self.env_manager.make_env(
-            env_spec, save_images=False, submission_id=str(self.submission_id)
-        )
+        env = self.env_manager.make_env(env_spec, submission_id=str(self.submission_id))
 
         # Get parameters from env_spec (which now contains them)
         episodes_per_task = env_spec.episodes_per_task
@@ -301,7 +302,9 @@ class RolloutWorker:
         self.episode_loggers[env_key] = episode_logger
 
         episodes = []
-        for episode_id in range(episodes_per_task):
+        for episode_iter in range(episodes_per_task):
+            episode_id = self._global_episode_counter
+            self._global_episode_counter += 1
             try:
                 episode_result = await self.run_episode(
                     env,
@@ -314,7 +317,13 @@ class RolloutWorker:
                 )
                 episodes.append(episode_result)
             except Exception:
-                logger.exception("Failed episode %d for %s", episode_id, env_spec)
+                logger.exception(
+                    "Failed episode %d (iteration %d/%d) for %s",
+                    episode_id,
+                    episode_iter + 1,
+                    episodes_per_task,
+                    env_spec,
+                )
                 continue
 
         env.close()
@@ -349,6 +358,93 @@ class RolloutWorker:
         if episode_logger:
             episode_logger.start_episode(episode_id)
 
+        def _to_numpy(value: Any) -> np.ndarray:
+            """Best-effort conversion of tensors/lists to contiguous numpy arrays."""
+            if isinstance(value, np.ndarray):
+                arr = value
+            elif isinstance(value, torch.Tensor):
+                arr = value.detach().cpu().numpy()
+            else:
+                arr = np.asarray(value)
+
+            if arr.dtype == object:
+                raise TypeError(
+                    "Cannot convert object-dtype observation value to numpy array"
+                )
+
+            return np.ascontiguousarray(arr)
+
+        def _normalize_for_rpc(obs: Any) -> Any:
+            """Prepare observation payload (array or dict of arrays) for RPC transmission."""
+            if isinstance(obs, dict):
+                normalized: dict[str, np.ndarray] = {}
+                for key, value in obs.items():
+                    try:
+                        normalized[key] = _to_numpy(value)
+                    except Exception as exc:
+                        logger.warning(
+                            "Dropping observation key %s due to conversion failure: %s",
+                            key,
+                            exc,
+                        )
+                return normalized
+
+            return _to_numpy(obs)
+
+        def _extract_image_payloads(obs: Any) -> list[tuple[np.ndarray, str]]:
+            """Extract HWC uint8 image payloads from observation dictionaries for logging."""
+            if not isinstance(obs, dict):
+                return []
+
+            camera_names = list(getattr(env_spec, "camera_names", ()) or ("default",))
+            image_entries: list[tuple[int, Any]] = []
+            for key, value in obs.items():
+                if not isinstance(key, str) or not key.startswith("observation.image"):
+                    continue
+                suffix = key[len("observation.image") :]
+                if suffix == "":
+                    index = 0
+                else:
+                    try:
+                        index = max(int(suffix) - 1, 0)
+                    except ValueError:
+                        index = len(image_entries)
+                image_entries.append((index, value))
+
+            if not image_entries:
+                return []
+
+            image_payloads: list[tuple[np.ndarray, str]] = []
+            image_entries.sort(key=lambda item: item[0])
+            for idx, value in image_entries:
+                try:
+                    img_arr = _to_numpy(value)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to convert observation image %s: %s", idx, exc
+                    )
+                    continue
+
+                if img_arr.ndim == 3 and img_arr.shape[0] in (1, 3):
+                    img_hwc = np.moveaxis(img_arr, 0, -1)
+                else:
+                    img_hwc = np.asarray(img_arr)
+
+                img_hwc = np.ascontiguousarray(img_hwc)
+                if img_hwc.dtype != np.uint8:
+                    img_hwc = np.clip(img_hwc, 0, 255).astype(np.uint8)
+
+                if camera_names and idx < len(camera_names):
+                    camera_name = camera_names[idx]
+                elif camera_names:
+                    camera_name = camera_names[min(idx, len(camera_names) - 1)]
+                else:
+                    camera_name = f"camera_{idx}"
+
+                image_payloads.append((img_hwc, camera_name))
+
+            return image_payloads
+
         # Reset may return (obs, info) or just obs depending on gym
         res = env.reset()
         if isinstance(res, tuple) and len(res) == 2:
@@ -366,29 +462,18 @@ class RolloutWorker:
             try:
                 if step_count == 0:
                     logger.debug(
-                        "Episode first obs type=%s shape=%s",
+                        "Episode first obs type=%s keys=%s",
                         type(observation),
-                        getattr(observation, "shape", None),
+                        list(observation.keys())
+                        if isinstance(observation, dict)
+                        else None,
                     )
 
-                if not hasattr(observation, "tobytes"):
-                    # if observation is a dict (gym.Dict), flatten to concatenated array or handle appropriately
-                    # simple fallback: try to convert dict of arrays to concatenated vector
-                    if isinstance(observation, dict):
-                        obs_arr = np.concatenate(
-                            [
-                                np.asarray(v).ravel()
-                                for _, v in sorted(observation.items())
-                            ]
-                        )
-                    else:
-                        obs_arr = np.asarray(observation)
-                else:
-                    obs_arr = np.asarray(observation)
+                obs_payload = _normalize_for_rpc(observation)
 
-                rpc_msg = RPCRequest.create_act(obs_arr)
-                await send_queue.put_async(rpc_msg)
-                resp = await recv_queue.get_async()
+                rpc_msg = RPCRequest.create_act(obs_payload)
+                await send_queue.put_async(rpc_msg, timeout=PGQ_TIMEOUT)
+                resp = await recv_queue.get_async(timeout=PGQ_TIMEOUT)
                 action_tensor = resp.result
                 if isinstance(action_tensor, torch.Tensor):
                     action_arr = action_tensor.detach().cpu().numpy()
@@ -428,42 +513,38 @@ class RolloutWorker:
 
                 # Log step data if logger is available
                 if episode_logger:
-                    # Capture observations if the environment wrapper has the method
-                    observations = None
-                    logger.debug(
-                        f"Environment type: {type(env)}, has capture method: {hasattr(env, 'capture_and_save_images')}"
+                    # Extract observations (images) from the wrapper output when available
+                    print(
+                        f"[EP_CAM] Extracting images from observations: {type(observation)}"
                     )
+                    obs_images = _extract_image_payloads(observation)
+                    if not obs_images:
+                        print("[EP_CAM] Warning: no image observations found")
+                        # Fallback to legacy capture methods if wrapper data is unavailable
+                        capture_source = None
+                        if hasattr(env, "capture_and_save_images"):
+                            capture_source = env
+                        elif hasattr(env, "env") and hasattr(
+                            env.env, "capture_and_save_images"
+                        ):
+                            capture_source = env.env
 
-                    # Check if the wrapped environment has the method
-                    if hasattr(env, "env") and hasattr(
-                        env.env, "capture_and_save_images"
-                    ):
-                        logger.debug(
-                            f"Wrapped environment type: {type(env.env)}, has capture method: True"
-                        )
-                        try:
-                            images_hwc, camera_names = env.env.capture_and_save_images()
-                            observations = list(zip(images_hwc, camera_names))
-                            logger.info(
-                                f"Captured {len(images_hwc)} images from cameras: {camera_names}"
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"Could not capture images from wrapped env: {e}"
-                            )
-                    elif hasattr(env, "capture_and_save_images"):
-                        try:
-                            images_hwc, camera_names = env.capture_and_save_images()
-                            observations = list(zip(images_hwc, camera_names))
-                            logger.info(
-                                f"Captured {len(images_hwc)} images from cameras: {camera_names}"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Could not capture images: {e}")
-                    else:
-                        logger.warning(
-                            "Environment does not have capture_and_save_images method"
-                        )
+                        if capture_source:
+                            try:
+                                images_hwc, camera_names = (
+                                    capture_source.capture_and_save_images()
+                                )
+                                obs_images = list(zip(images_hwc, camera_names))
+                                logger.debug(
+                                    "Captured %d fallback images from cameras: %s",
+                                    len(images_hwc),
+                                    camera_names,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Could not capture images from fallback source: %s",
+                                    exc,
+                                )
 
                     await episode_logger.log_step(
                         step=step_count,
@@ -471,7 +552,7 @@ class RolloutWorker:
                         reward=reward_value,
                         done=done,
                         truncated=False,  # Add truncated detection if available
-                        observations=observations,
+                        observations=obs_images if obs_images else None,
                         info=info,
                     )
 

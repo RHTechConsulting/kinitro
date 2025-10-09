@@ -4,7 +4,6 @@ from enum import Enum
 from typing import Any, Optional
 
 import capnp
-import numpy as np
 import torch
 from ray.util.queue import Queue
 from snowflake import SnowflakeGenerator
@@ -13,6 +12,8 @@ from evaluator.rpc.client import AgentClient
 
 # RPC timeout constant
 DEFAULT_RPC_TIMEOUT = 5.0
+# Ray PG queue timeout to avoid indefinite blocking on slow consumers.
+PGQ_TIMEOUT = 5.0
 
 
 class RPCMethod(Enum):
@@ -53,10 +54,8 @@ class RPCRequest:
         )
 
     @classmethod
-    def create_act(
-        cls, obs: np.ndarray, timeout: float = DEFAULT_RPC_TIMEOUT
-    ) -> "RPCRequest":
-        """Create an act request with observation"""
+    def create_act(cls, obs: Any, timeout: float = DEFAULT_RPC_TIMEOUT) -> "RPCRequest":
+        """Create an act request with observation payload (array or dict)."""
         return cls(
             method=RPCMethod.ACT,
             request_id=str(next(SnowflakeGenerator(42))),
@@ -241,7 +240,9 @@ class RPCProcess:
                         continue
 
                     # Get request message from Ray Worker
-                    request: RPCRequest = await self.recv_queue.get_async()
+                    request: RPCRequest = await self.recv_queue.get_async(
+                        timeout=PGQ_TIMEOUT
+                    )
                     print(
                         f"RPC[{self.host}:{self.port}] received: method={request.method.value}, id={request.request_id[:8]}"
                     )
@@ -265,7 +266,7 @@ class RPCProcess:
                         )
 
                     # Send response back to Ray Worker
-                    await self.send_queue.put_async(response)
+                    await self.send_queue.put_async(response, timeout=PGQ_TIMEOUT)
 
                 except Exception as e:
                     print(f"Error processing request in RPC process: {e}")
@@ -274,7 +275,9 @@ class RPCProcess:
                         error_response = RPCResponse.from_processing_error(
                             request.request_id, f"Request processing failed: {str(e)}"
                         )
-                        await self.send_queue.put_async(error_response)
+                        await self.send_queue.put_async(
+                            error_response, timeout=PGQ_TIMEOUT
+                        )
                     break
 
         except Exception as e:

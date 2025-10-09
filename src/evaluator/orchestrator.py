@@ -181,7 +181,6 @@ class Orchestrator:
             provider=eval_job_msg.env_provider,
             benchmark_name=eval_job_msg.benchmark_name,
             config=eval_job_msg.config,
-            enable_image_obs=True,
             render_mode="rgb_array",
         )
 
@@ -355,6 +354,8 @@ class Orchestrator:
                 # Calculate metrics
                 if results:
                     total_episodes = sum(len(result.episodes) for result in results)
+                    if total_episodes == 0:
+                        total_episodes = None
                     avg_success_rate = sum(
                         result.success_rate for result in results
                     ) / len(results)
@@ -362,13 +363,13 @@ class Orchestrator:
                         results
                     )
 
-                    logger.info(f"Job {job_id} - Total episodes: {total_episodes}")
+                    logger.info(f"Job {job_id} - Total episodes: {total_episodes or 0}")
                     logger.info(
                         f"Job {job_id} - Average success rate: {avg_success_rate:.3f}"
                     )
                     logger.info(f"Job {job_id} - Average reward: {avg_reward:.3f}")
                 else:
-                    total_episodes = 0
+                    total_episodes = None
                     avg_success_rate = 0.0
                     avg_reward = 0.0
 
@@ -616,7 +617,7 @@ class Orchestrator:
                         score=0.0,
                         success_rate=0.0,
                         avg_reward=0.0,
-                        total_episodes=0,
+                        total_episodes=None,
                         logs="Job failed due to orchestrator restart",
                         error="Orchestrator restart - job was not completed",
                         extra_data=None,
