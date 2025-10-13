@@ -1,0 +1,152 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: validatordb
+      POSTGRES_USER: validator
+      POSTGRES_PASSWORD: CHANGEME
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "validator", "-d", "validatordb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - validator-db:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  migrator:
+    image: kinitro-migrator:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/migrator.dockerfile
+    profiles: ["ops"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_NAME: validatordb
+      DB_USER: validator
+      DB_PASSWORD: CHANGEME
+
+  validator:
+    image: ghcr.io/threetau/kinitro-validator:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/validator.dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: validatordb
+      DB_USER: validator
+      DB_PASSWORD: CHANGEME
+      KINITRO_API_KEY: "${KINITRO_API_KEY}"
+    volumes:
+      - ./validator-config:/etc/kinitro:ro
+      - ${ENV_FILE:-deploy/docker/.env}:/app/.env:ro
+      - ${BITTENSOR_HOME:-${HOME}/.bittensor}:/var/lib/kinitro/.bittensor
+    command: ["--"]
+
+  evaluator:
+    profiles: ["cpu"]
+    shm_size: "4gb"
+    image: ghcr.io/threetau/kinitro-evaluator:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/evaluator.dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      validator:
+        condition: service_started
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: validatordb
+      DB_USER: validator
+      DB_PASSWORD: CHANGEME
+      RUN_MIGRATIONS: "0"
+    volumes:
+      - ./evaluator-config:/etc/kinitro:ro
+      - ${KUBECONFIG:-./deploy/docker/evaluator-config/kubeconfig.yaml}:/var/lib/kinitro/.kube/config:ro
+      - ${ENV_FILE:-./deploy/docker/.env}:/app/.env:ro
+      - ${BITTENSOR_HOME:-${HOME}/.bittensor}:/var/lib/kinitro/.bittensor
+    command: ["--"]
+    # NOTE: join minikube bridge so evaluator can reach 192.168.49.2:8443
+    networks:
+      - default
+      - minikube
+
+  evaluator-gpu:
+    image: ghcr.io/threetau/kinitro-evaluator:latest-gpu
+    profiles: ["gpu"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/evaluator-cuda.dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      validator:
+        condition: service_started
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: validatordb
+      DB_USER: validator
+      DB_PASSWORD: CHANGEME
+      RUN_MIGRATIONS: "0"
+      NVIDIA_VISIBLE_DEVICES: all
+      # NOTE: should we use 'all' or these specific capabilities?
+      # NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      NVIDIA_DRIVER_CAPABILITIES: all
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
+    volumes:
+      - ./evaluator-config:/etc/kinitro:ro
+      - ${KUBECONFIG:-./deploy/docker/evaluator-config/kubeconfig.yaml}:/var/lib/kinitro/.kube/config:ro
+      - ${ENV_FILE:-./deploy/docker/.env}:/app/.env:ro
+      - ${BITTENSOR_HOME:-${HOME}/.bittensor}:/var/lib/kinitro/.bittensor
+      - /dev/dri:/dev/dri
+      - /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["--"]
+    # NOTE: GPU evaluator also attaches to minikube network for API access
+    networks:
+      - default
+      - minikube
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    depends_on:
+      validator:
+        condition: service_started
+    command: ["validator", "evaluator"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_SCHEDULE: "* * * * *"
+
+volumes:
+  validator-db:
+
+# NOTE: external minikube network so containers can reach kube API
+networks:
+  minikube:
+    external: true
+    name: minikube
