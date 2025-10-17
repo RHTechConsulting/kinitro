@@ -122,12 +122,6 @@ class BackendService:
             "weight_broadcast_interval", WEIGHT_BROADCAST_INTERVAL
         )
 
-        # Submission hold-out configuration
-        self.submission_holdout_seconds = int(
-            config.settings.get(
-                "submission_holdout_seconds", DEFAULT_SUBMISSION_HOLDOUT_SECONDS
-            )
-        )
         self.submission_upload_url_ttl = int(
             config.settings.get(
                 "submission_upload_url_ttl_seconds",
@@ -233,7 +227,6 @@ class BackendService:
         version: str,
         artifact_sha256: str,
         artifact_size_bytes: int,
-        holdout_seconds: Optional[int] = None,
     ) -> tuple[SubmissionUpload, PresignedUpload]:
         """Create a submission upload record and mint an upload URL."""
 
@@ -273,10 +266,7 @@ class BackendService:
             if not competition.active:
                 raise RuntimeError(f"Competition {competition_id} is not active")
 
-            if holdout_seconds is not None:
-                holdout = max(0, int(holdout_seconds))
-            else:
-                holdout = max(0, competition.submission_holdout_seconds)
+            holdout = max(0, competition.submission_holdout_seconds)
 
             existing_submission = await session.execute(
                 select(MinerSubmission).where(

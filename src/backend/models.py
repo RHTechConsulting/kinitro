@@ -17,11 +17,11 @@ from sqlalchemy import (
 from sqlalchemy import (
     DateTime as SADateTime,
 )
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy import (
     String as SAString,
 )
 from sqlalchemy import Text as SAText
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.sql import func
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 

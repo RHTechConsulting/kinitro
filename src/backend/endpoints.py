@@ -91,7 +91,6 @@ class SubmissionUploadRequest(BaseModel):
     timestamp: int = Field(ge=0)
     hotkey: str
     signature: str
-    holdout_seconds: Optional[int] = None
 
     @field_validator("competition_id")
     @classmethod
@@ -142,7 +141,6 @@ class SubmissionUploadResponse(BaseModel):
     expires_at: datetime
     headers: Dict[str, str]
     object_key: str
-    holdout_seconds: int
     artifact_sha256: str
     artifact_size_bytes: int
     commit_payload: Dict[str, Any]
@@ -157,8 +155,6 @@ def _build_submission_upload_message(payload: SubmissionUploadRequest) -> bytes:
         str(payload.artifact_size_bytes),
         str(payload.timestamp),
     ]
-    if payload.holdout_seconds is not None:
-        parts.append(str(payload.holdout_seconds))
     return "|".join(parts).encode("utf-8")
 
 
@@ -251,12 +247,6 @@ async def request_submission_upload(
 ) -> SubmissionUploadResponse:
     """Create a presigned upload slot for a miner submission."""
 
-    if payload.holdout_seconds is not None and payload.holdout_seconds < 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="holdout_seconds must be non-negative",
-        )
-
     now = datetime.now(timezone.utc)
     timestamp_dt = datetime.fromtimestamp(payload.timestamp, tz=timezone.utc)
     if abs((now - timestamp_dt).total_seconds()) > SUBMISSION_SIGNATURE_MAX_AGE_SECONDS:
@@ -291,7 +281,6 @@ async def request_submission_upload(
             version=payload.version,
             artifact_sha256=payload.artifact_sha256,
             artifact_size_bytes=payload.artifact_size_bytes,
-            holdout_seconds=payload.holdout_seconds,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -313,7 +302,6 @@ async def request_submission_upload(
         expires_at=presigned.expires_at,
         headers=presigned.headers,
         object_key=upload_record.artifact_object_key,
-        holdout_seconds=upload_record.holdout_seconds,
         artifact_sha256=upload_record.artifact_sha256,
         artifact_size_bytes=upload_record.artifact_size_bytes,
         commit_payload=commit_payload,
@@ -401,7 +389,6 @@ async def create_competition(
             active=True,
             start_time=competition.start_time,
             end_time=competition.end_time,
-            submission_holdout_seconds=competition.submission_holdout_seconds,
         )
 
         session.add(db_competition)
