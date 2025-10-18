@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import (
+    Body,
     Depends,
     FastAPI,
     HTTPException,
@@ -41,8 +42,12 @@ from backend.events import (
     ValidatorDisconnectedEvent,
 )
 from backend.realtime import event_broadcaster
-from backend.service import BackendService
-from core import __version__ as VERSION
+from backend.service import (
+    BackendService,
+    LeaderCandidateAlreadyReviewedError,
+    LeaderCandidateNotFoundError,
+)
+from core import __version__ as VERSION  # noqa: N812
 from core.db.models import EvaluationStatus, SnowflakeId
 from core.log import get_logger
 from core.messages import (
@@ -68,12 +73,16 @@ from .models import (
     BackendStatsResponse,
     Competition,
     CompetitionCreateRequest,
+    CompetitionLeaderCandidate,
+    CompetitionLeaderCandidateResponse,
     CompetitionResponse,
     EpisodeData,
     EpisodeStepData,
     EvaluationResultResponse,
     JobResponse,
     JobStatusResponse,
+    LeaderCandidateReviewRequest,
+    LeaderCandidateStatus,
     MinerSubmission,
     MinerSubmissionResponse,
     ValidatorConnection,
@@ -1088,6 +1097,133 @@ async def create_api_key(
             created_at=db_api_key.created_at,
             api_key=api_key,
         )
+
+
+@app.get(
+    "/admin/leader-candidates",
+    response_model=List[CompetitionLeaderCandidateResponse],
+)
+async def list_leader_candidates(
+    admin_user: ApiKey = Depends(require_admin),
+    competition_id: Optional[str] = Query(
+        None, description="Filter by competition"
+    ),
+    status: Optional[LeaderCandidateStatus] = Query(
+        None, description="Filter by review status"
+    ),
+    miner_hotkey: Optional[str] = Query(
+        None, description="Filter by miner hotkey"
+    ),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+):
+    """List leader candidates for review (admin only)."""
+
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        stmt = select(CompetitionLeaderCandidate).order_by(
+            CompetitionLeaderCandidate.created_at.desc()
+        )
+
+        if competition_id:
+            stmt = stmt.where(
+                CompetitionLeaderCandidate.competition_id == competition_id
+            )
+        if status:
+            stmt = stmt.where(CompetitionLeaderCandidate.status == status)
+        if miner_hotkey:
+            stmt = stmt.where(
+                CompetitionLeaderCandidate.miner_hotkey == miner_hotkey
+            )
+
+        stmt = stmt.offset(offset).limit(limit)
+
+        result = await session.execute(stmt)
+        candidates = result.scalars().all()
+
+        return [
+            CompetitionLeaderCandidateResponse.model_validate(candidate)
+            for candidate in candidates
+        ]
+
+
+@app.post(
+    "/admin/leader-candidates/{candidate_id}/approve",
+    response_model=CompetitionLeaderCandidateResponse,
+)
+async def approve_leader_candidate(
+    candidate_id: int,
+    decision: Optional[LeaderCandidateReviewRequest] = Body(
+        default=None, description="Optional approval notes"
+    ),
+    admin_user: ApiKey = Depends(require_admin),
+):
+    """Approve a pending leader candidate (admin only)."""
+
+    decision = decision or LeaderCandidateReviewRequest()
+
+    try:
+        candidate = await backend_service.approve_leader_candidate(
+            candidate_id,
+            admin_user.id,
+            decision.reason,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except LeaderCandidateNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except LeaderCandidateAlreadyReviewedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+    return CompetitionLeaderCandidateResponse.model_validate(candidate)
+
+
+@app.post(
+    "/admin/leader-candidates/{candidate_id}/reject",
+    response_model=CompetitionLeaderCandidateResponse,
+)
+async def reject_leader_candidate(
+    candidate_id: int,
+    decision: Optional[LeaderCandidateReviewRequest] = Body(
+        default=None, description="Optional rejection notes"
+    ),
+    admin_user: ApiKey = Depends(require_admin),
+):
+    """Reject a pending leader candidate (admin only)."""
+
+    decision = decision or LeaderCandidateReviewRequest()
+
+    try:
+        candidate = await backend_service.reject_leader_candidate(
+            candidate_id,
+            admin_user.id,
+            decision.reason,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except LeaderCandidateNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except LeaderCandidateAlreadyReviewedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+    return CompetitionLeaderCandidateResponse.model_validate(candidate)
 
 
 @app.get("/admin/api-keys", response_model=List[ApiKeyResponse])
