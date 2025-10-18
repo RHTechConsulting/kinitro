@@ -105,7 +105,9 @@ def upgrade() -> None:
         ["miner_hotkey"],
     )
     op.create_index(
-        "ix_leader_candidates_reviewed", "competition_leader_candidates", ["reviewed_by_api_key_id"]
+        "ix_leader_candidates_reviewed",
+        "competition_leader_candidates",
+        ["reviewed_by_api_key_id"],
     )
     op.create_index(
         "ix_leader_candidates_eval_result",

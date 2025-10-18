@@ -1104,16 +1104,11 @@ async def create_api_key(
     response_model=List[CompetitionLeaderCandidateResponse],
 )
 async def list_leader_candidates(
-    admin_user: ApiKey = Depends(require_admin),
-    competition_id: Optional[str] = Query(
-        None, description="Filter by competition"
-    ),
+    competition_id: Optional[str] = Query(None, description="Filter by competition"),
     status: Optional[LeaderCandidateStatus] = Query(
         None, description="Filter by review status"
     ),
-    miner_hotkey: Optional[str] = Query(
-        None, description="Filter by miner hotkey"
-    ),
+    miner_hotkey: Optional[str] = Query(None, description="Filter by miner hotkey"),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -1137,9 +1132,7 @@ async def list_leader_candidates(
         if status:
             stmt = stmt.where(CompetitionLeaderCandidate.status == status)
         if miner_hotkey:
-            stmt = stmt.where(
-                CompetitionLeaderCandidate.miner_hotkey == miner_hotkey
-            )
+            stmt = stmt.where(CompetitionLeaderCandidate.miner_hotkey == miner_hotkey)
 
         stmt = stmt.offset(offset).limit(limit)
 

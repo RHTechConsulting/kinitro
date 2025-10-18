@@ -1015,7 +1015,9 @@ class CompetitionLeaderCandidate(TimestampMixin, SQLModel, table=True):
         default=None, sa_column=Column(SADateTime(timezone=True), nullable=True)
     )
 
-    competition: Optional["Competition"] = Relationship(back_populates="leader_candidates")
+    competition: Optional["Competition"] = Relationship(
+        back_populates="leader_candidates"
+    )
     evaluation_result: Optional["BackendEvaluationResult"] = Relationship(
         back_populates="leader_candidates"
     )
