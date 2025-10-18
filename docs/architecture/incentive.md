@@ -53,4 +53,3 @@ Administrators can annotate approvals or rejections, and the backend records the
 - Scores depend on trusted evaluation results. Validators should ensure evaluators are running the same container images and configuration to avoid inconsistent outcomes.
 - When no miner satisfies a competition’s success criteria, the backend skips weight updates for that competition and previously broadcast weights decay to zero.
 - Validators without an active API key will fail to receive weight updates.
-- Pending leader candidates accumulate until an administrator responds; plan on an approval rota so scoring cycles continue to reward fresh leaders in a timely manner.
