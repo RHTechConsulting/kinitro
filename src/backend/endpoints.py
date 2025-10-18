@@ -4,14 +4,14 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from fastapi import (
     Body,
-    Depends,
     FastAPI,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -22,12 +22,11 @@ from sqlalchemy import func, select
 
 from backend.auth import (
     UserRole,
-    create_auth_dependency,
-    create_role_dependencies,
     generate_api_key,
     get_api_key_from_db,
     hash_api_key,
 )
+from backend.auth_middleware import AdminAuthMiddleware, ApiAuthMiddleware, admin_route
 from backend.constants import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -171,12 +170,6 @@ def _build_submission_upload_message(payload: SubmissionUploadRequest) -> bytes:
 config = BackendConfig()
 backend_service = BackendService(config)
 
-# Set up authentication dependencies
-get_current_user = create_auth_dependency(backend_service)
-require_admin, require_validator, require_auth = create_role_dependencies(
-    get_current_user
-)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -217,6 +210,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(ApiAuthMiddleware, backend_service=backend_service)
+app.add_middleware(AdminAuthMiddleware)
+
+
+def get_admin_user(request: Request) -> ApiKey:
+    """Return the authenticated admin user set by the middleware."""
+    return cast(ApiKey, request.state.api_user)
 
 
 # ============================================================================
@@ -379,9 +379,8 @@ async def get_stats() -> BackendStatsResponse:
 
 # Competition endpoints
 @app.post("/competitions", response_model=CompetitionResponse)
-async def create_competition(
-    competition: CompetitionCreateRequest, admin_user: "ApiKey" = Depends(require_admin)
-):
+@admin_route
+async def create_competition(competition: CompetitionCreateRequest):
     """Create a new competition."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -454,9 +453,8 @@ async def get_competition(competition_id: str):
 
 
 @app.patch("/competitions/{competition_id}/activate")
-async def activate_competition(
-    competition_id: str, admin_user: "ApiKey" = Depends(require_admin)
-):
+@admin_route
+async def activate_competition(competition_id: str):
     """Activate a competition."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -481,9 +479,8 @@ async def activate_competition(
 
 
 @app.patch("/competitions/{competition_id}/deactivate")
-async def deactivate_competition(
-    competition_id: str, admin_user: "ApiKey" = Depends(require_admin)
-):
+@admin_route
+async def deactivate_competition(competition_id: str):
     """Deactivate a competition."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -508,9 +505,8 @@ async def deactivate_competition(
 
 
 @app.delete("/competitions/{competition_id}")
-async def delete_competition(
-    competition_id: str, admin_user: "ApiKey" = Depends(require_admin)
-):
+@admin_route
+async def delete_competition(competition_id: str):
     """Delete a competition (soft delete by deactivating)."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -1046,9 +1042,8 @@ async def get_steps(
 
 
 @app.post("/admin/api-keys", response_model=ApiKeyCreateResponse)
-async def create_api_key(
-    key_request: ApiKeyCreateRequest, admin_user: ApiKey = Depends(require_admin)
-):
+@admin_route
+async def create_api_key(key_request: ApiKeyCreateRequest):
     """Create a new API key (admin only)."""
     # Validate role
     try:
@@ -1103,6 +1098,7 @@ async def create_api_key(
     "/admin/leader-candidates",
     response_model=List[CompetitionLeaderCandidateResponse],
 )
+@admin_route
 async def list_leader_candidates(
     competition_id: Optional[str] = Query(None, description="Filter by competition"),
     status: Optional[LeaderCandidateStatus] = Query(
@@ -1149,16 +1145,19 @@ async def list_leader_candidates(
     "/admin/leader-candidates/{candidate_id}/approve",
     response_model=CompetitionLeaderCandidateResponse,
 )
+@admin_route
 async def approve_leader_candidate(
     candidate_id: int,
+    request: Request,
     decision: Optional[LeaderCandidateReviewRequest] = Body(
         default=None, description="Optional approval notes"
     ),
-    admin_user: ApiKey = Depends(require_admin),
 ):
     """Approve a pending leader candidate (admin only)."""
 
     decision = decision or LeaderCandidateReviewRequest()
+
+    admin_user = get_admin_user(request)
 
     try:
         candidate = await backend_service.approve_leader_candidate(
@@ -1186,16 +1185,19 @@ async def approve_leader_candidate(
     "/admin/leader-candidates/{candidate_id}/reject",
     response_model=CompetitionLeaderCandidateResponse,
 )
+@admin_route
 async def reject_leader_candidate(
     candidate_id: int,
+    request: Request,
     decision: Optional[LeaderCandidateReviewRequest] = Body(
         default=None, description="Optional rejection notes"
     ),
-    admin_user: ApiKey = Depends(require_admin),
 ):
     """Reject a pending leader candidate (admin only)."""
 
     decision = decision or LeaderCandidateReviewRequest()
+
+    admin_user = get_admin_user(request)
 
     try:
         candidate = await backend_service.reject_leader_candidate(
@@ -1220,8 +1222,8 @@ async def reject_leader_candidate(
 
 
 @app.get("/admin/api-keys", response_model=List[ApiKeyResponse])
+@admin_route
 async def list_api_keys(
-    admin_user: ApiKey = Depends(require_admin),
     skip: int = Query(0, ge=0),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
 ):
@@ -1243,10 +1245,8 @@ async def list_api_keys(
 
 
 @app.get("/admin/api-keys/{key_id}", response_model=ApiKeyResponse)
-async def get_api_key(
-    key_id: int,
-    admin_user: ApiKey = Depends(require_admin),
-):
+@admin_route
+async def get_api_key(key_id: int):
     """Get a specific API key by ID (admin only)."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -1267,10 +1267,8 @@ async def get_api_key(
 
 
 @app.patch("/admin/api-keys/{key_id}/activate")
-async def activate_api_key(
-    key_id: int,
-    admin_user: ApiKey = Depends(require_admin),
-):
+@admin_route
+async def activate_api_key(key_id: int):
     """Activate an API key (admin only)."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -1294,10 +1292,8 @@ async def activate_api_key(
 
 
 @app.patch("/admin/api-keys/{key_id}/deactivate")
-async def deactivate_api_key(
-    key_id: int,
-    admin_user: ApiKey = Depends(require_admin),
-):
+@admin_route
+async def deactivate_api_key(key_id: int):
     """Deactivate an API key (admin only)."""
     if not backend_service.async_session:
         raise HTTPException(
@@ -1321,10 +1317,8 @@ async def deactivate_api_key(
 
 
 @app.delete("/admin/api-keys/{key_id}")
-async def delete_api_key(
-    key_id: int,
-    admin_user: ApiKey = Depends(require_admin),
-):
+@admin_route
+async def delete_api_key(key_id: int):
     """Delete an API key (admin only)."""
     if not backend_service.async_session:
         raise HTTPException(
