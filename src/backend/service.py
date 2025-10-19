@@ -33,6 +33,8 @@ from backend.constants import (
     CHAIN_SCAN_YIELD_INTERVAL,
     DEFAULT_CHAIN_SYNC_INTERVAL,
     DEFAULT_MAX_COMMITMENT_LOOKBACK,
+    DEFAULT_OWNER_UID,
+    DEFAULT_BURN_PCT,
     EVAL_JOB_TIMEOUT,
     HEARTBEAT_INTERVAL,
     HOLDOUT_RELEASE_SCAN_INTERVAL,
@@ -125,6 +127,38 @@ class BackendService:
         self.chain_sync_interval = config.settings.get(
             "chain_sync_interval", DEFAULT_CHAIN_SYNC_INTERVAL
         )
+
+        owner_uid_setting = config.settings.get("owner_uid", DEFAULT_OWNER_UID)
+        try:
+            self.owner_uid = int(owner_uid_setting)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid owner_uid setting %r; falling back to default %s",
+                owner_uid_setting,
+                DEFAULT_OWNER_UID,
+            )
+            self.owner_uid = DEFAULT_OWNER_UID
+
+        burn_pct_setting = config.settings.get("burn_pct", DEFAULT_BURN_PCT)
+        try:
+            burn_pct = float(burn_pct_setting)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid burn_pct setting %r; falling back to default %.3f",
+                burn_pct_setting,
+                DEFAULT_BURN_PCT,
+            )
+            burn_pct = DEFAULT_BURN_PCT
+
+        if burn_pct < 0 or burn_pct > 1:
+            logger.warning(
+                "Configured burn_pct %.3f out of bounds [0, 1]; clamping.",
+                burn_pct,
+            )
+            burn_pct = max(0.0, min(1.0, burn_pct))
+
+        self.burn_pct = burn_pct
+        logger.info("Burn percentage configured at %.2f%%", self.burn_pct * 100)
 
         # Scoring and weight broadcast intervals
         self.score_evaluation_interval = config.settings.get(
@@ -1000,10 +1034,8 @@ class BackendService:
                     )
                     continue
 
-                normalized_score = (
-                    competition.points / total_points if total_points else 0
-                )
-                if normalized_score == 0:
+                base_score = competition.points / total_points if total_points else 0
+                if base_score == 0:
                     logger.debug(
                         "Competition %s: Skipping zero-point competition in scoring",
                         competition.id,
@@ -1016,17 +1048,40 @@ class BackendService:
                         award_hotkey,
                         competition.id,
                         miner_scores[award_hotkey],
-                        normalized_score,
+                        base_score * (1 - self.burn_pct),
                     )
                     continue
 
-                miner_scores[award_hotkey] = normalized_score
-                logger.info(
-                    "Competition %s: Awarded %.4f normalized score to %s",
-                    competition.id,
-                    normalized_score,
-                    award_hotkey,
-                )
+                awarded_score = base_score * (1 - self.burn_pct)
+                burned_score = base_score - awarded_score
+
+                if awarded_score <= 0:
+                    logger.info(
+                        "Competition %s: Burned entire %.4f normalized score for %s (burn_pct=%.2f%%)",
+                        competition.id,
+                        base_score,
+                        award_hotkey,
+                        self.burn_pct * 100,
+                    )
+                    continue
+
+                miner_scores[award_hotkey] = awarded_score
+                if burned_score > 0:
+                    logger.info(
+                        "Competition %s: Awarded %.4f normalized score to %s (burned %.4f; burn_pct=%.2f%%)",
+                        competition.id,
+                        awarded_score,
+                        award_hotkey,
+                        burned_score,
+                        self.burn_pct * 100,
+                    )
+                else:
+                    logger.info(
+                        "Competition %s: Awarded %.4f normalized score to %s",
+                        competition.id,
+                        awarded_score,
+                        award_hotkey,
+                    )
 
             # Commit any leader updates to database
             await session.commit()
@@ -1056,7 +1111,8 @@ class BackendService:
                 self._latest_miner_scores = miner_scores
 
                 logger.info(
-                    f"Score evaluation complete. {len(miner_scores)} miners scored."
+                    "Score evaluation complete. %s miners scored.",
+                    len(miner_scores),
                 )
 
             except Exception as e:
@@ -1162,6 +1218,32 @@ class BackendService:
                 node = self.nodes.get(hotkey)
                 if node:
                     weights_dict[node.node_id] = weight
+
+            total_weight = sum(weights_dict.values())
+            if total_weight > 1.0:
+                logger.warning(
+                    "Total miner weight %.6f exceeds 1.0 before owner allocation",
+                    total_weight,
+                )
+
+            owner_weight = max(0.0, 1.0 - total_weight)
+            if owner_weight > 0:
+                weights_dict[self.owner_uid] = (
+                    weights_dict.get(self.owner_uid, 0.0) + owner_weight
+                )
+                if all(node.node_id != self.owner_uid for node in self.nodes.values()):
+                    logger.warning(
+                        "Owner UID %s not found in node list; assigning %.4f weight without hotkey mapping",
+                        self.owner_uid,
+                        owner_weight,
+                    )
+                else:
+                    logger.info(
+                        "Owner UID %s assigned remaining normalized score %.4f (burn_pct=%.2f%%)",
+                        self.owner_uid,
+                        owner_weight,
+                        self.burn_pct * 100,
+                    )
 
             if not weights_dict:
                 logger.info("No miner scores to broadcast")
