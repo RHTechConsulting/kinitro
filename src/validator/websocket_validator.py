@@ -146,8 +146,11 @@ class WebSocketValidator(Neuron):
 
             async with websockets.connect(
                 self.backend_url,
-                ping_interval=20,
-                ping_timeout=10,
+                # NOTE: Disabled the library keepalive pings so we rely on our
+                # application-level heartbeat rather than closing the
+                # connection when the event loop is busy.
+                ping_interval=None,
+                ping_timeout=None,
                 close_timeout=10,
             ) as websocket:
                 self.websocket = websocket
