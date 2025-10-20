@@ -48,6 +48,8 @@ from backend.constants import (
     WEIGHT_BROADCAST_STARTUP_DELAY,
 )
 from backend.events import (
+    EpisodeCompletedEvent,
+    EpisodeStepEvent,
     JobCompletedEvent,
     JobCreatedEvent,
     JobStatusChangedEvent,
@@ -71,6 +73,8 @@ from core.chain import query_commitments_from_substrate
 from core.db.models import EvaluationStatus
 from core.log import get_logger
 from core.messages import (
+    EpisodeDataMessage,
+    EpisodeStepDataMessage,
     EvalJobMessage,
     EventType,
     SetWeightsMessage,
@@ -86,6 +90,8 @@ from .models import (
     BackendState,
     Competition,
     CompetitionLeaderCandidate,
+    EpisodeData,
+    EpisodeStepData,
     LeaderCandidateStatus,
     MinerSubmission,
     SS58Address,
@@ -99,6 +105,11 @@ dotenv.load_dotenv()
 logger = get_logger(__name__)
 
 ConnectionId = str  # Unique ID for each WebSocket connection
+
+VALIDATOR_MESSAGE_QUEUE_MAXSIZE = 5000
+VALIDATOR_MESSAGE_BATCH_SIZE = 50
+VALIDATOR_MESSAGE_BATCH_INTERVAL = 0.5
+VALIDATOR_MESSAGE_WORKERS = 2
 
 
 class LeaderCandidateError(Exception):
@@ -224,6 +235,16 @@ class BackendService:
 
         # Thread pool for blocking operations
         self.thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+        # Validator message processing
+        self._validator_message_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(
+            maxsize=VALIDATOR_MESSAGE_QUEUE_MAXSIZE
+        )
+        self._validator_worker_tasks: List[asyncio.Task] = []
+        self._validator_queue_warning_threshold = int(
+            VALIDATOR_MESSAGE_QUEUE_MAXSIZE * 0.8
+        )
+        self._validator_queue_warning_triggered = False
 
     @staticmethod
     def verify_hotkey_signature(
@@ -384,6 +405,16 @@ class BackendService:
         )
         self._stale_job_monitor_task = asyncio.create_task(self._monitor_stale_jobs())
 
+        for worker_id in range(VALIDATOR_MESSAGE_WORKERS):
+            worker_task = asyncio.create_task(self._validator_message_worker(worker_id))
+            self._validator_worker_tasks.append(worker_task)
+
+        if self._validator_worker_tasks:
+            logger.info(
+                "Started %d validator message workers",
+                len(self._validator_worker_tasks),
+            )
+
         # Delay before starting scoring
         logger.info(
             f"Starting score evaluation task in {SCORE_EVALUATION_STARTUP_DELAY} seconds..."
@@ -437,6 +468,9 @@ class BackendService:
             (self._holdout_release_task, "holdout_release"),
         ]
 
+        for idx, task in enumerate(self._validator_worker_tasks):
+            tasks_to_cancel.append((task, f"validator_worker_{idx}"))
+
         for task, name in tasks_to_cancel:
             if task:
                 logger.info(f"Cancelling {name} task")
@@ -445,6 +479,8 @@ class BackendService:
                     await task
                 except asyncio.CancelledError as e:
                     logger.error(f"{name} task cancelled: {e}")
+
+        self._validator_worker_tasks.clear()
 
         # Close WebSocket connections
         for ws in self.active_connections.values():
@@ -652,6 +688,372 @@ class BackendService:
             except Exception as e:
                 logger.error(f"Error monitoring stale jobs: {e}")
                 await asyncio.sleep(300)
+
+    async def queue_validator_heartbeat(
+        self, validator_hotkey: SS58Address, timestamp: datetime
+    ) -> None:
+        """Queue a validator heartbeat for asynchronous persistence."""
+
+        enqueued = await self._enqueue_validator_message(
+            {
+                "type": "heartbeat",
+                "validator_hotkey": validator_hotkey,
+                "timestamp": timestamp,
+            },
+            block=False,
+        )
+
+        if not enqueued:
+            logger.warning(
+                "Dropping heartbeat for %s due to full validator queue",
+                validator_hotkey,
+            )
+
+    async def queue_episode_data(
+        self, validator_hotkey: SS58Address, message: EpisodeDataMessage
+    ) -> None:
+        """Queue episode data for asynchronous persistence."""
+
+        enqueued = await self._enqueue_validator_message(
+            {
+                "type": "episode_data",
+                "validator_hotkey": validator_hotkey,
+                "message": message,
+            }
+        )
+
+        if not enqueued:
+            logger.error(
+                "Failed to enqueue episode data for submission %s episode %s",
+                message.submission_id,
+                message.episode_id,
+            )
+
+    async def queue_episode_step_data(
+        self, validator_hotkey: SS58Address, message: EpisodeStepDataMessage
+    ) -> None:
+        """Queue episode step data for asynchronous persistence."""
+
+        enqueued = await self._enqueue_validator_message(
+            {
+                "type": "episode_step_data",
+                "validator_hotkey": validator_hotkey,
+                "message": message,
+            }
+        )
+
+        if not enqueued:
+            logger.error(
+                "Failed to enqueue step data for submission %s episode %s step %s",
+                message.submission_id,
+                message.episode_id,
+                message.step,
+            )
+
+    async def _enqueue_validator_message(
+        self, payload: Dict[str, Any], *, block: bool = True
+    ) -> bool:
+        """Enqueue a validator message, optionally dropping if queue is saturated."""
+
+        if not self._running:
+            logger.debug(
+                "Received validator message %s while backend not running",
+                payload.get("type"),
+            )
+            return False
+
+        queue_size = self._validator_message_queue.qsize()
+        if queue_size > self._validator_queue_warning_threshold:
+            if not self._validator_queue_warning_triggered:
+                logger.warning(
+                    "Validator message queue high water mark: %s/%s",
+                    queue_size,
+                    VALIDATOR_MESSAGE_QUEUE_MAXSIZE,
+                )
+                self._validator_queue_warning_triggered = True
+        elif self._validator_queue_warning_triggered and queue_size < (
+            self._validator_queue_warning_threshold // 2
+        ):
+            logger.info(
+                "Validator message queue draining (current size %s)", queue_size
+            )
+            self._validator_queue_warning_triggered = False
+
+        try:
+            if block:
+                await self._validator_message_queue.put(payload)
+            else:
+                self._validator_message_queue.put_nowait(payload)
+            return True
+        except asyncio.QueueFull:
+            logger.error(
+                "Validator message queue full; dropping %s message",
+                payload.get("type"),
+            )
+            return False
+
+    async def _validator_message_worker(self, worker_id: int) -> None:
+        """Background worker that batches validator messages before persisting."""
+
+        logger.info("Validator message worker %s started", worker_id)
+        try:
+            while self._running:
+                try:
+                    message = await self._validator_message_queue.get()
+                except asyncio.CancelledError:
+                    break
+
+                batch = [message]
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + VALIDATOR_MESSAGE_BATCH_INTERVAL
+
+                while len(batch) < VALIDATOR_MESSAGE_BATCH_SIZE:
+                    timeout = deadline - loop.time()
+                    if timeout <= 0:
+                        break
+
+                    try:
+                        next_message = await asyncio.wait_for(
+                            self._validator_message_queue.get(), timeout
+                        )
+                        batch.append(next_message)
+                    except asyncio.TimeoutError:
+                        break
+                    except asyncio.CancelledError:
+                        raise
+
+                try:
+                    await self._process_validator_batch(batch)
+                except Exception as exc:  # pragma: no cover - best effort logging
+                    logger.error(
+                        "Validator message worker %s failed to process batch: %s",
+                        worker_id,
+                        exc,
+                    )
+                finally:
+                    for _ in batch:
+                        self._validator_message_queue.task_done()
+
+        finally:
+            logger.info("Validator message worker %s stopped", worker_id)
+
+    async def _process_validator_batch(self, batch: List[Dict[str, Any]]) -> None:
+        """Persist a batch of validator messages and emit related events."""
+
+        if not batch:
+            return
+
+        if not self.async_session:
+            logger.error("Database not initialized; dropping validator messages")
+            return
+
+        heartbeats: Dict[SS58Address, datetime] = {}
+        episodes: List[Dict[str, Any]] = []
+        steps: List[Dict[str, Any]] = []
+
+        for item in batch:
+            message_type = item.get("type")
+            if message_type == "heartbeat":
+                timestamp = item["timestamp"]
+                hotkey = item["validator_hotkey"]
+                current = heartbeats.get(hotkey)
+                if current is None or timestamp > current:
+                    heartbeats[hotkey] = timestamp
+            elif message_type == "episode_data":
+                episodes.append(item)
+            elif message_type == "episode_step_data":
+                steps.append(item)
+            else:
+                logger.warning("Unknown validator message type: %s", message_type)
+
+        pending_events: List[tuple[EventType, Any]] = []
+        status_updates: List[Dict[str, Any]] = []
+        status_update_keys: set[tuple[Any, SS58Address]] = set()
+
+        def _ensure_datetime(value: Any) -> datetime:
+            if isinstance(value, datetime):
+                return value
+            return datetime.fromisoformat(value)
+
+        async with self.async_session() as session:
+            if heartbeats:
+                result = await session.execute(
+                    select(ValidatorConnection).where(
+                        ValidatorConnection.validator_hotkey.in_(heartbeats.keys())
+                    )
+                )
+
+                for validator in result.scalars():
+                    validator.last_heartbeat = heartbeats[validator.validator_hotkey]
+                    validator.is_connected = True
+
+            episode_lookup: Dict[tuple[str, int, str], EpisodeData] = {}
+
+            if episodes:
+                for payload in episodes:
+                    message: EpisodeDataMessage = payload["message"]
+                    validator_hotkey: SS58Address = payload["validator_hotkey"]
+
+                    episode_record = EpisodeData(
+                        id=next(self.id_generator),
+                        job_id=message.job_id,
+                        submission_id=message.submission_id,
+                        validator_hotkey=validator_hotkey,
+                        task_id=message.task_id,
+                        episode_id=message.episode_id,
+                        env_name=message.env_name,
+                        benchmark_name=message.benchmark_name,
+                        final_reward=message.final_reward,
+                        success=message.success,
+                        steps=message.steps,
+                        start_time=_ensure_datetime(message.start_time),
+                        end_time=_ensure_datetime(message.end_time),
+                        extra_metrics=message.extra_metrics,
+                    )
+
+                    session.add(episode_record)
+                    episode_lookup[
+                        (
+                            message.submission_id,
+                            message.episode_id,
+                            message.task_id,
+                        )
+                    ] = episode_record
+
+                    pending_events.append(
+                        (
+                            EventType.EPISODE_COMPLETED,
+                            EpisodeCompletedEvent(
+                                job_id=message.job_id,
+                                submission_id=message.submission_id,
+                                validator_hotkey=validator_hotkey,
+                                episode_id=message.episode_id,
+                                env_name=message.env_name,
+                                benchmark_name=message.benchmark_name,
+                                final_reward=message.final_reward,
+                                success=message.success,
+                                steps=message.steps,
+                                start_time=_ensure_datetime(message.start_time),
+                                end_time=_ensure_datetime(message.end_time),
+                                extra_metrics=message.extra_metrics,
+                                created_at=datetime.now(timezone.utc),
+                            ),
+                        ),
+                    )
+
+                    status_result = await session.execute(
+                        select(BackendEvaluationJobStatus).where(
+                            BackendEvaluationJobStatus.job_id == message.job_id,
+                            BackendEvaluationJobStatus.validator_hotkey
+                            == validator_hotkey,
+                            BackendEvaluationJobStatus.status
+                            == EvaluationStatus.RUNNING,
+                        )
+                    )
+
+                    if not status_result.scalar_one_or_none():
+                        status_key = (message.job_id, validator_hotkey)
+                        if status_key in status_update_keys:
+                            continue
+
+                        status_updates.append(
+                            {
+                                "job_id": message.job_id,
+                                "validator_hotkey": validator_hotkey,
+                                "status": EvaluationStatus.RUNNING,
+                                "detail": f"Started processing episodes (episode {message.episode_id})",
+                            }
+                        )
+                        status_update_keys.add(status_key)
+
+                await session.flush()
+
+            if steps:
+                for payload in steps:
+                    message: EpisodeStepDataMessage = payload["message"]
+                    validator_hotkey: SS58Address = payload["validator_hotkey"]
+
+                    lookup_key = (
+                        message.submission_id,
+                        message.episode_id,
+                        message.task_id,
+                    )
+                    episode_record = episode_lookup.get(lookup_key)
+
+                    if not episode_record:
+                        episode_result = await session.execute(
+                            select(EpisodeData).where(
+                                EpisodeData.submission_id == message.submission_id,
+                                EpisodeData.episode_id == message.episode_id,
+                                EpisodeData.task_id == message.task_id,
+                            )
+                        )
+                        episode_record = episode_result.scalar_one_or_none()
+
+                    if not episode_record:
+                        logger.warning(
+                            "Episode not found for step data: submission %s episode %s",
+                            message.submission_id,
+                            message.episode_id,
+                        )
+                        continue
+
+                    step_record = EpisodeStepData(
+                        id=next(self.id_generator),
+                        episode_id=episode_record.id,
+                        submission_id=message.submission_id,
+                        validator_hotkey=validator_hotkey,
+                        task_id=message.task_id,
+                        step=message.step,
+                        action=message.action,
+                        reward=message.reward,
+                        done=message.done,
+                        truncated=message.truncated,
+                        observation_refs=message.observation_refs,
+                        info=message.info,
+                        timestamp=_ensure_datetime(message.step_timestamp),
+                    )
+
+                    session.add(step_record)
+
+                    pending_events.append(
+                        (
+                            EventType.EPISODE_STEP,
+                            EpisodeStepEvent(
+                                submission_id=message.submission_id,
+                                validator_hotkey=validator_hotkey,
+                                episode_id=message.episode_id,
+                                step=message.step,
+                                action=message.action,
+                                reward=message.reward,
+                                done=message.done,
+                                truncated=message.truncated,
+                                observation_refs=message.observation_refs,
+                                info=message.info,
+                            ),
+                        )
+                    )
+
+            if heartbeats or episodes or steps:
+                await session.commit()
+
+        for update in status_updates:
+            await self._update_job_status(
+                update["job_id"],
+                update["validator_hotkey"],
+                update["status"],
+                update["detail"],
+            )
+
+        for event_type, event_payload in pending_events:
+            await event_broadcaster.broadcast_event(event_type, event_payload)
+
+        if heartbeats:
+            logger.debug("Processed %s heartbeat updates", len(heartbeats))
+        if episodes:
+            logger.info("Persisted %s episode records", len(episodes))
+        if steps:
+            logger.debug("Persisted %s episode step records", len(steps))
 
     async def _monitor_validator_heartbeats(self) -> None:
         """Monitor validator heartbeats and cleanup stale connections."""

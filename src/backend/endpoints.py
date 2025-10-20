@@ -1475,22 +1475,10 @@ async def validator_websocket(websocket: WebSocket):
             message_type = message.get("message_type")
 
             if message_type == MessageType.HEARTBEAT:
-                # Update heartbeat
-                if not backend_service.async_session:
-                    logger.error("Database not initialized")
-                    continue
-                async with backend_service.async_session() as session:
-                    result = await session.execute(
-                        select(ValidatorConnection).where(
-                            ValidatorConnection.validator_hotkey == validator_hotkey
-                        )
-                    )
-                    validator_conn = result.scalar_one_or_none()
-                    if validator_conn:
-                        validator_conn.last_heartbeat = datetime.now(timezone.utc)
-                        await session.commit()
+                await backend_service.queue_validator_heartbeat(
+                    validator_hotkey, datetime.now(timezone.utc)
+                )
 
-                # Send heartbeat ack
                 await websocket.send_text(
                     json.dumps(
                         {
@@ -1628,155 +1616,27 @@ async def validator_websocket(websocket: WebSocket):
                 )
 
             elif message_type == MessageType.EPISODE_DATA:
-                # Handle episode data
                 episode_msg = EpisodeDataMessage(**message)
+                await backend_service.queue_episode_data(validator_hotkey, episode_msg)
 
-                if not backend_service.async_session:
-                    logger.error("Database not initialized")
-                    continue
-
-                async with backend_service.async_session() as session:
-                    # Create episode record
-                    episode_record = EpisodeData(
-                        id=next(backend_service.id_generator),
-                        job_id=episode_msg.job_id,
-                        submission_id=episode_msg.submission_id,
-                        validator_hotkey=validator_hotkey,
-                        task_id=episode_msg.task_id,
-                        episode_id=episode_msg.episode_id,
-                        env_name=episode_msg.env_name,
-                        benchmark_name=episode_msg.benchmark_name,
-                        final_reward=episode_msg.final_reward,
-                        success=episode_msg.success,
-                        steps=episode_msg.steps,
-                        start_time=datetime.fromisoformat(episode_msg.start_time)
-                        if isinstance(episode_msg.start_time, str)
-                        else episode_msg.start_time,
-                        end_time=datetime.fromisoformat(episode_msg.end_time)
-                        if isinstance(episode_msg.end_time, str)
-                        else episode_msg.end_time,
-                        extra_metrics=episode_msg.extra_metrics,
-                    )
-
-                    session.add(episode_record)
-                    await session.commit()
-
-                    # Broadcast episode completed event to clients using the model
-                    episode_event = EpisodeCompletedEvent(
-                        job_id=episode_msg.job_id,
-                        submission_id=episode_msg.submission_id,
-                        validator_hotkey=validator_hotkey,
-                        episode_id=episode_msg.episode_id,
-                        env_name=episode_msg.env_name,
-                        benchmark_name=episode_msg.benchmark_name,
-                        final_reward=episode_msg.final_reward,
-                        success=episode_msg.success,
-                        steps=episode_msg.steps,
-                        start_time=episode_msg.start_time
-                        if isinstance(episode_msg.start_time, datetime)
-                        else datetime.fromisoformat(episode_msg.start_time),
-                        end_time=episode_msg.end_time
-                        if isinstance(episode_msg.end_time, datetime)
-                        else datetime.fromisoformat(episode_msg.end_time),
-                        extra_metrics=episode_msg.extra_metrics,
-                        created_at=datetime.now(timezone.utc),
-                    )
-                    await event_broadcaster.broadcast_event(
-                        EventType.EPISODE_COMPLETED, episode_event
-                    )
-
-                    # Check if this is the first episode for this job-validator combination
-                    # If so, update status to RUNNING
-                    status_result = await session.execute(
-                        select(BackendEvaluationJobStatus).where(
-                            BackendEvaluationJobStatus.job_id == episode_msg.job_id,
-                            BackendEvaluationJobStatus.validator_hotkey
-                            == validator_hotkey,
-                            BackendEvaluationJobStatus.status
-                            == EvaluationStatus.RUNNING,
-                        )
-                    )
-                    existing_running_status = status_result.scalar_one_or_none()
-
-                    if not existing_running_status:
-                        # First episode data received, mark as RUNNING
-                        await backend_service._update_job_status(
-                            episode_msg.job_id,
-                            validator_hotkey,
-                            EvaluationStatus.RUNNING,
-                            f"Started processing episodes (episode {episode_msg.episode_id})",
-                        )
-
-                    logger.info(
-                        f"Stored episode data from {validator_hotkey} for episode {episode_msg.episode_id}"
-                    )
+                logger.debug(
+                    "Queued episode data from %s for episode %s",
+                    validator_hotkey,
+                    episode_msg.episode_id,
+                )
 
             elif message_type == MessageType.EPISODE_STEP_DATA:
-                # Handle episode step data
                 step_msg = EpisodeStepDataMessage(**message)
+                await backend_service.queue_episode_step_data(
+                    validator_hotkey, step_msg
+                )
 
-                if not backend_service.async_session:
-                    logger.error("Database not initialized")
-                    continue
-
-                async with backend_service.async_session() as session:
-                    # Find the episode record
-                    episode_result = await session.execute(
-                        select(EpisodeData).where(
-                            EpisodeData.submission_id == step_msg.submission_id,
-                            EpisodeData.episode_id == step_msg.episode_id,
-                            EpisodeData.task_id == step_msg.task_id,
-                        )
-                    )
-                    episode_record = episode_result.scalar_one_or_none()
-
-                    if episode_record:
-                        # Create step record
-                        step_record = EpisodeStepData(
-                            id=next(backend_service.id_generator),
-                            episode_id=episode_record.id,  # Use the database episode ID
-                            submission_id=step_msg.submission_id,
-                            validator_hotkey=validator_hotkey,
-                            task_id=step_msg.task_id,
-                            step=step_msg.step,
-                            action=step_msg.action,
-                            reward=step_msg.reward,
-                            done=step_msg.done,
-                            truncated=step_msg.truncated,
-                            observation_refs=step_msg.observation_refs,
-                            info=step_msg.info,
-                            timestamp=datetime.fromisoformat(step_msg.step_timestamp)
-                            if isinstance(step_msg.step_timestamp, str)
-                            else step_msg.step_timestamp,
-                        )
-
-                        session.add(step_record)
-                        await session.commit()
-
-                        # Broadcast episode step event to clients
-                        step_event = EpisodeStepEvent(
-                            submission_id=step_msg.submission_id,
-                            validator_hotkey=validator_hotkey,
-                            episode_id=step_msg.episode_id,
-                            step=step_msg.step,
-                            action=step_msg.action,
-                            reward=step_msg.reward,
-                            done=step_msg.done,
-                            truncated=step_msg.truncated,
-                            observation_refs=step_msg.observation_refs,
-                            info=step_msg.info,
-                        )
-                        await event_broadcaster.broadcast_event(
-                            EventType.EPISODE_STEP, step_event
-                        )
-
-                        logger.info(
-                            f"Stored step data from {validator_hotkey} for episode {step_msg.episode_id}, step {step_msg.step}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Episode not found for step data: submission {step_msg.submission_id}, episode {step_msg.episode_id}"
-                        )
+                logger.debug(
+                    "Queued step data from %s for episode %s step %s",
+                    validator_hotkey,
+                    step_msg.episode_id,
+                    step_msg.step,
+                )
 
     except WebSocketDisconnect:
         logger.info(f"Validator disconnected: {connection_id}")

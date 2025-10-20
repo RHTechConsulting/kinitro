@@ -62,6 +62,9 @@ except ImportError:
 
 logger = get_logger(__name__)
 
+CLIENT_SEND_QUEUE_MAXSIZE = 200
+CLIENT_SEND_TIMEOUT = 5.0
+
 
 class ClientConnection:
     """Represents a connected client with their subscriptions."""
@@ -72,6 +75,71 @@ class ClientConnection:
         self.subscriptions: Dict[str, SubscriptionRequest] = {}
         self.connected_at = datetime.now(timezone.utc)
         self.last_ping = datetime.now(timezone.utc)
+        self.send_queue: asyncio.Queue[str] = asyncio.Queue(
+            maxsize=CLIENT_SEND_QUEUE_MAXSIZE
+        )
+        self.sender_task: Optional[asyncio.Task] = None
+        self._closed = False
+
+    def start_sender(self) -> asyncio.Task:
+        """Ensure the outbound sender task is running and return it."""
+
+        if self.sender_task:
+            return self.sender_task
+
+        self.sender_task = asyncio.create_task(self._sender_loop())
+        return self.sender_task
+
+    def enqueue(self, payload: str) -> bool:
+        """Queue a payload for delivery. Returns False if the queue is full."""
+
+        if self._closed:
+            return False
+
+        try:
+            self.send_queue.put_nowait(payload)
+            return True
+        except asyncio.QueueFull:
+            return False
+
+    async def close(self) -> None:
+        """Close the client connection and cancel the sender task."""
+
+        if self._closed:
+            return
+
+        self._closed = True
+
+        try:
+            self.send_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            while not self.send_queue.empty():
+                try:
+                    self.send_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                self.send_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+        if self.sender_task:
+            self.sender_task.cancel()
+            try:
+                await self.sender_task
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            await self.websocket.close()
+        except Exception:
+            pass
+
+    @property
+    def is_active(self) -> bool:
+        """Return True while the connection is open and sending."""
+
+        return not self._closed
 
     def add_subscription(self, subscription_id: str, request: SubscriptionRequest):
         """Add a subscription for this client."""
@@ -125,6 +193,47 @@ class ClientConnection:
         )
         return matching_subscriptions
 
+    async def _sender_loop(self) -> None:
+        """Continuously deliver queued messages to the client websocket."""
+
+        try:
+            while True:
+                payload = await self.send_queue.get()
+                if payload is None:
+                    self.send_queue.task_done()
+                    break
+
+                try:
+                    await asyncio.wait_for(
+                        self.websocket.send_text(payload),
+                        CLIENT_SEND_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out sending message to client %s after %.1fs",
+                        self.connection_id,
+                        CLIENT_SEND_TIMEOUT,
+                    )
+                    break
+                except Exception as exc:  # pragma: no cover - network failure
+                    logger.error(
+                        "Failed to send message to client %s: %s",
+                        self.connection_id,
+                        exc,
+                    )
+                    break
+                finally:
+                    self.send_queue.task_done()
+
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._closed = True
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
+
 
 class RealtimeEventBroadcaster:
     """
@@ -160,10 +269,9 @@ class RealtimeEventBroadcaster:
                 pass
 
         # Close all client connections
-        for connection in self.client_connections.values():
-            await connection.websocket.close()
+        for connection_id in list(self.client_connections.keys()):
+            await self.remove_client(connection_id)
 
-        self.client_connections.clear()
         logger.info("Realtime event broadcaster stopped")
 
     async def add_client(
@@ -172,14 +280,36 @@ class RealtimeEventBroadcaster:
         """Add a new client connection."""
         connection = ClientConnection(connection_id, websocket)
         self.client_connections[connection_id] = connection
+        sender_task = connection.start_sender()
+        sender_task.add_done_callback(
+            lambda task, cid=connection_id: asyncio.create_task(
+                self._handle_sender_done(cid, task)
+            )
+        )
         logger.info(f"Client {connection_id} connected")
         return connection
 
     async def remove_client(self, connection_id: str):
         """Remove a client connection."""
-        if connection_id in self.client_connections:
-            del self.client_connections[connection_id]
+        connection = self.client_connections.pop(connection_id, None)
+        if connection:
+            await connection.close()
             logger.info(f"Client {connection_id} disconnected")
+
+    async def _handle_sender_done(self, connection_id: str, task: asyncio.Task) -> None:
+        """Cleanup when a client's sender task exits unexpectedly."""
+
+        if connection_id not in self.client_connections:
+            return
+
+        if task.cancelled():
+            return
+
+        exc = task.exception()
+        if exc:
+            logger.warning("Client %s sender exited with error: %s", connection_id, exc)
+
+        await self.remove_client(connection_id)
 
     async def broadcast_event(
         self, event_type: EventType, event_data: Union[BaseEvent, Dict[str, Any]]
@@ -203,6 +333,20 @@ class RealtimeEventBroadcaster:
         )
         await self._broadcast_queue.put((event_type, event_data_dict))
 
+    async def _queue_payload_for_client(
+        self, connection: ClientConnection, payload: str
+    ) -> bool:
+        """Attempt to queue a payload for a client, disconnecting on backpressure."""
+
+        if connection.enqueue(payload):
+            return True
+
+        logger.warning(
+            "Client %s send queue full; disconnecting", connection.connection_id
+        )
+        await self.remove_client(connection.connection_id)
+        return False
+
     async def _process_broadcast_queue(self):
         """Process events from the broadcast queue and send to clients."""
         while self._running:
@@ -217,40 +361,36 @@ class RealtimeEventBroadcaster:
                 )
 
                 # Send to all relevant clients
-                disconnected_clients = []
                 sent_count = 0
 
-                for connection_id, connection in self.client_connections.items():
+                for connection_id, connection in list(self.client_connections.items()):
+                    if not connection.is_active:
+                        await self.remove_client(connection_id)
+                        continue
+
                     subscription_ids = connection.should_receive_event(
                         event_type, event_data
                     )
 
-                    if subscription_ids:
-                        # Client should receive this event
-                        for sub_id in subscription_ids:
-                            message = EventMessage(
-                                event_type=event_type,
-                                event_data=event_data,
-                                subscription_id=sub_id,
-                            )
+                    if not subscription_ids:
+                        continue
 
-                            try:
-                                await connection.websocket.send_text(
-                                    message.model_dump_json()
-                                )
-                                sent_count += 1
-                                logger.debug(
-                                    f"Sent {event_type} event to client {connection_id}"
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to send event to client {connection_id}: {e}"
-                                )
-                                disconnected_clients.append(connection_id)
+                    for sub_id in subscription_ids:
+                        message = EventMessage(
+                            event_type=event_type,
+                            event_data=event_data,
+                            subscription_id=sub_id,
+                        )
 
-                # Remove disconnected clients
-                for connection_id in disconnected_clients:
-                    await self.remove_client(connection_id)
+                        if not await self._queue_payload_for_client(
+                            connection, message.model_dump_json()
+                        ):
+                            break
+
+                        sent_count += 1
+                        logger.debug(
+                            f"Queued {event_type} event to client {connection_id}"
+                        )
 
                 if sent_count > 0:
                     logger.debug(
@@ -286,7 +426,9 @@ class RealtimeEventBroadcaster:
                     event_type=EventType.STATS_UPDATED,  # Placeholder, should be error type
                     event_data={"error": f"Unknown message type: {message_type}"},
                 )
-                await connection.websocket.send_text(error_msg.model_dump_json())
+                await self._queue_payload_for_client(
+                    connection, error_msg.model_dump_json()
+                )
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON from client {connection_id}: {e}")
@@ -296,7 +438,9 @@ class RealtimeEventBroadcaster:
                     event_type=EventType.STATS_UPDATED,  # Placeholder
                     event_data={"error": "Invalid JSON format"},
                 )
-                await connection.websocket.send_text(error_msg.model_dump_json())
+                await self._queue_payload_for_client(
+                    connection, error_msg.model_dump_json()
+                )
         except Exception as e:
             logger.error(f"Error handling client message: {e}")
 
@@ -317,7 +461,7 @@ class RealtimeEventBroadcaster:
                 subscribed_events=msg.subscription.event_types,
                 request_id=msg.request_id,
             )
-            await connection.websocket.send_text(ack.model_dump_json())
+            await self._queue_payload_for_client(connection, ack.model_dump_json())
 
             # Send initial state data for relevant subscriptions
             await self._send_initial_state_data(
@@ -345,7 +489,7 @@ class RealtimeEventBroadcaster:
                 ack = UnsubscriptionAckMessage(
                     subscription_id=msg.subscription_id, request_id=msg.request_id
                 )
-                await connection.websocket.send_text(ack.model_dump_json())
+                await self._queue_payload_for_client(connection, ack.model_dump_json())
 
                 logger.info(
                     f"Client {connection.connection_id} unsubscribed from {msg.subscription_id}"
@@ -362,7 +506,7 @@ class RealtimeEventBroadcaster:
         """Handle ping message."""
         connection.last_ping = datetime.now(timezone.utc)
         pong = PongMessage(request_id=data.get("request_id"))
-        await connection.websocket.send_text(pong.model_dump_json())
+        await self._queue_payload_for_client(connection, pong.model_dump_json())
 
     async def _send_initial_state_data(
         self,
@@ -392,8 +536,8 @@ class RealtimeEventBroadcaster:
                                 event_data=data_item,
                                 subscription_id=subscription_id,
                             )
-                            await connection.websocket.send_text(
-                                message.model_dump_json()
+                            await self._queue_payload_for_client(
+                                connection, message.model_dump_json()
                             )
                             logger.debug(
                                 f"Sent initial state data for {event_type} to client {connection.connection_id}"
