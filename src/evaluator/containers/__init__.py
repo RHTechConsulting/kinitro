@@ -17,7 +17,7 @@ class Containers:
     DELETE_RETRY_INTERVAL = 5
     CONTAINER_RETRY_COUNT = 2
     POD_READY_TIMEOUT_SECONDS = 600
-    POD_POLL_INTERVAL_SECONDS = 2
+    POD_POLL_INTERVAL_SECONDS = 2.0
 
     @staticmethod
     def _set_env(container_spec: dict, name: str, value: str | None) -> None:
@@ -51,6 +51,54 @@ class Containers:
                 print(f"No events found for pod {pod_name}")
         except Exception as e:
             print(f"Error retrieving pod events for {pod_name}: {e}")
+
+    @staticmethod
+    def _print_pod_logs(core_api: client.CoreV1Api, pod_name: str) -> None:
+        """Print logs for init and main containers."""
+
+        try:
+            print(f"Getting init container logs for {pod_name}...")
+            try:
+                init_logs = core_api.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace="default",
+                    container="fetch-submission",
+                    tail_lines=100,
+                )
+                print(f"Init container logs for {pod_name}:\n{init_logs}")
+            except Exception as exc:
+                print(f"Error retrieving init container logs: {exc}")
+
+            print(f"Getting runner container logs for {pod_name}...")
+            try:
+                runner_logs = core_api.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace="default",
+                    container="runner",
+                    tail_lines=100,
+                )
+                print(f"Runner container logs for {pod_name}:\n{runner_logs}")
+            except Exception as exc:
+                print(f"Error retrieving runner container logs: {exc}")
+
+        except Exception as exc:
+            print(f"Error retrieving container logs for {pod_name}: {exc}")
+
+    def _handle_failed_pod(
+        self,
+        core_api: client.CoreV1Api,
+        pod_name: str,
+        submission_id: SnowflakeId,
+    ) -> None:
+        """Capture diagnostics and tear down a failed pod."""
+
+        self._print_pod_logs(core_api, pod_name)
+        self._log_pod_events(core_api, pod_name)
+
+        try:
+            self.cleanup_container(submission_id, wait=False)
+        except Exception as exc:
+            print(f"Error cleaning up failed pod {pod_name}: {exc}")
 
     def create_container(
         self,
@@ -119,114 +167,99 @@ class Containers:
         }
         pod = client.V1Pod(**pod_config)
 
-        # Create the pod in the default namespace
-        print("Submitting pod to Kubernetes...")
-        for attempt in range(self.CONTAINER_RETRY_COUNT):
-            try:
-                k8v1api.create_namespaced_pod(namespace="default", body=pod)
-                break
-            except ApiException as api_exc:
-                if (
-                    api_exc.status == 409
-                    and "AlreadyExists" in api_exc.reason
-                    and attempt == 0
-                ):
-                    print(
-                        f"Pod {container_name} already exists; waiting for prior instance to terminate"
-                    )
-                    self._wait_for_pod_absence(k8v1api, container_name)
-                    continue
-                raise
-        print(f"Pod {container_name} created, waiting for it to start...")
+        pod_created = False
+        pod_ready = False
 
-        # Wait for the pod to be running before attempting to connect
-        start_time = time.time()
-        last_phase = None
-        last_unsched_message = None
-
-        while True:
-            try:
-                pod_info = k8v1api.read_namespaced_pod(container_name, "default")
-                phase = pod_info.status.phase  # type: ignore
-                if phase != last_phase:
-                    print(f"Pod {container_name} status changed: {phase}")
-                    last_phase = phase
-
-                if phase == "Running":
-                    print(f"Pod {container_name} is now running!")
-                    break
-                elif phase in ("Failed", "Succeeded"):
-                    print(f"Pod {container_name} reached terminal state: {phase}")
-                    self._log_pod_events(k8v1api, container_name)
-                    raise RuntimeError(
-                        f"Pod {container_name} terminated unexpectedly with phase {phase}"
-                    )
-                else:
-                    conditions = pod_info.status.conditions or []  # type: ignore
-                    unsched_messages = []
-                    for condition in conditions:
-                        if (
-                            condition.type == "PodScheduled"
-                            and condition.status == "False"
-                        ):
-                            detail = (
-                                condition.message or condition.reason or "unspecified"
-                            )
-                            unsched_messages.append(detail)
-                    if unsched_messages:
-                        condensed = "; ".join(sorted(set(unsched_messages)))
-                        if condensed != last_unsched_message:
-                            print(
-                                f"Pod {container_name} pending scheduling: {condensed}"
-                            )
-                            last_unsched_message = condensed
-
-                if (time.time() - start_time) >= self.POD_READY_TIMEOUT_SECONDS:
-                    self._log_pod_events(k8v1api, container_name)
-                    raise RuntimeError(
-                        f"Pod {container_name} did not become ready within {self.POD_READY_TIMEOUT_SECONDS}s"
-                    )
-
-                time.sleep(self.POD_POLL_INTERVAL_SECONDS)
-            except Exception as e:
-                if isinstance(e, RuntimeError):
-                    raise
-                print(
-                    f"Waiting for pod to start (elapsed {int(time.time() - start_time)}s): {e}"
-                )
-                time.sleep(self.POD_POLL_INTERVAL_SECONDS)
-
-        # Get and print pod logs for both containers
         try:
-            print(f"Getting init container logs for {container_name}...")
-            try:
-                init_logs = k8v1api.read_namespaced_pod_log(
-                    name=container_name,
-                    namespace="default",
-                    container="fetch-submission",  # Init container name from podspec.yaml
-                    tail_lines=100,
-                )
-                print(f"Init container logs for {container_name}:\n{init_logs}")
-            except Exception as e:
-                print(f"Error retrieving init container logs: {e}")
+            # Create the pod in the default namespace
+            print("Submitting pod to Kubernetes...")
+            for attempt in range(self.CONTAINER_RETRY_COUNT):
+                try:
+                    k8v1api.create_namespaced_pod(namespace="default", body=pod)
+                    pod_created = True
+                    break
+                except ApiException as api_exc:
+                    if (
+                        api_exc.status == 409
+                        and "AlreadyExists" in api_exc.reason
+                        and attempt == 0
+                    ):
+                        print(
+                            f"Pod {container_name} already exists; waiting for prior instance to terminate"
+                        )
+                        self._wait_for_pod_absence(k8v1api, container_name)
+                        continue
+                    raise
+            print(f"Pod {container_name} created, waiting for it to start...")
 
-            print(f"Getting runner container logs for {container_name}...")
-            try:
-                runner_logs = k8v1api.read_namespaced_pod_log(
-                    name=container_name,
-                    namespace="default",
-                    container="runner",
-                    tail_lines=100,
-                )
-                print(f"Runner container logs for {container_name}:\n{runner_logs}")
-            except Exception as e:
-                print(f"Error retrieving runner container logs: {e}")
+            # Wait for the pod to be running before attempting to connect
+            start_time = time.time()
+            last_phase = None
+            last_unsched_message = None
 
-        except Exception as e:
-            print(f"Error retrieving container logs: {e}")
+            while True:
+                try:
+                    pod_info = k8v1api.read_namespaced_pod(container_name, "default")
+                    phase = pod_info.status.phase  # type: ignore
+                    if phase != last_phase:
+                        print(f"Pod {container_name} status changed: {phase}")
+                        last_phase = phase
 
-        # Get pod events for troubleshooting
-        self._log_pod_events(k8v1api, container_name)
+                    if phase == "Running":
+                        print(f"Pod {container_name} is now running!")
+                        pod_ready = True
+                        break
+                    elif phase in ("Failed", "Succeeded"):
+                        print(f"Pod {container_name} reached terminal state: {phase}")
+                        self._log_pod_events(k8v1api, container_name)
+                        raise RuntimeError(
+                            f"Pod {container_name} terminated unexpectedly with phase {phase}"
+                        )
+                    else:
+                        conditions = pod_info.status.conditions or []  # type: ignore
+                        unsched_messages = []
+                        for condition in conditions:
+                            if (
+                                condition.type == "PodScheduled"
+                                and condition.status == "False"
+                            ):
+                                detail = (
+                                    condition.message
+                                    or condition.reason
+                                    or "unspecified"
+                                )
+                                unsched_messages.append(detail)
+                        if unsched_messages:
+                            condensed = "; ".join(sorted(set(unsched_messages)))
+                            if condensed != last_unsched_message:
+                                print(
+                                    f"Pod {container_name} pending scheduling: {condensed}"
+                                )
+                                last_unsched_message = condensed
+
+                    if (time.time() - start_time) >= self.POD_READY_TIMEOUT_SECONDS:
+                        self._log_pod_events(k8v1api, container_name)
+                        raise RuntimeError(
+                            f"Pod {container_name} did not become ready within {self.POD_READY_TIMEOUT_SECONDS}s"
+                        )
+
+                    time.sleep(self.POD_POLL_INTERVAL_SECONDS)
+                except Exception as exc:
+                    if isinstance(exc, RuntimeError):
+                        raise
+                    print(
+                        f"Waiting for pod to start (elapsed {int(time.time() - start_time)}s): {exc}"
+                    )
+                    time.sleep(self.POD_POLL_INTERVAL_SECONDS)
+
+        except Exception:
+            if pod_created:
+                self._handle_failed_pod(k8v1api, container_name, submission_id)
+            raise
+
+        if pod_ready:
+            self._print_pod_logs(k8v1api, container_name)
+            self._log_pod_events(k8v1api, container_name)
 
         # Connect to the pod to check if it's working correctly
         resp = stream(
