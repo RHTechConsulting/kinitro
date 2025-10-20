@@ -16,6 +16,8 @@ class Containers:
     DELETE_TIMEOUT_SECONDS = 60
     DELETE_RETRY_INTERVAL = 5
     CONTAINER_RETRY_COUNT = 2
+    POD_READY_TIMEOUT_SECONDS = 600
+    POD_POLL_INTERVAL_SECONDS = 2
 
     @staticmethod
     def _set_env(container_spec: dict, name: str, value: str | None) -> None:
@@ -30,6 +32,25 @@ class Containers:
                 return
 
         env_list.append({"name": name, "value": value})
+
+    @staticmethod
+    def _log_pod_events(core_api: client.CoreV1Api, pod_name: str) -> None:
+        """List recent Kubernetes events for the given pod."""
+
+        try:
+            field_selector = f"involvedObject.name={pod_name}"
+            events = core_api.list_namespaced_event(
+                namespace="default", field_selector=field_selector
+            )
+            if events.items:
+                print(f"Events for pod {pod_name}:")
+                for event in events.items:
+                    timestamp = getattr(event, "last_timestamp", None)
+                    print(f"  {timestamp}: {event.reason} - {event.message}")
+            else:
+                print(f"No events found for pod {pod_name}")
+        except Exception as e:
+            print(f"Error retrieving pod events for {pod_name}: {e}")
 
     def create_container(
         self,
@@ -119,35 +140,61 @@ class Containers:
         print(f"Pod {container_name} created, waiting for it to start...")
 
         # Wait for the pod to be running before attempting to connect
-        for attempt in range(30):  # Wait up to 30 seconds
+        start_time = time.time()
+        last_phase = None
+        last_unsched_message = None
+
+        while True:
             try:
                 pod_info = k8v1api.read_namespaced_pod(container_name, "default")
                 phase = pod_info.status.phase  # type: ignore
-                print(f"Attempt {attempt + 1}/30: Pod status - {phase}")
+                if phase != last_phase:
+                    print(f"Pod {container_name} status changed: {phase}")
+                    last_phase = phase
 
                 if phase == "Running":
                     print(f"Pod {container_name} is now running!")
                     break
-                elif phase == "Pending":
-                    # Get more details on why it's still pending
-                    conditions = pod_info.status.conditions  # type: ignore
-                    container_statuses = pod_info.status.container_statuses  # type: ignore
-
-                    if conditions:
-                        print(
-                            f"Pod conditions: {[f'{c.type}: {c.status}, reason: {c.reason}' for c in conditions]}"
-                        )
-
-                    if container_statuses:
-                        for container in container_statuses:
-                            print(
-                                f"Container {container.name} state: {container.state}"
+                elif phase in ("Failed", "Succeeded"):
+                    print(f"Pod {container_name} reached terminal state: {phase}")
+                    self._log_pod_events(k8v1api, container_name)
+                    raise RuntimeError(
+                        f"Pod {container_name} terminated unexpectedly with phase {phase}"
+                    )
+                else:
+                    conditions = pod_info.status.conditions or []  # type: ignore
+                    unsched_messages = []
+                    for condition in conditions:
+                        if (
+                            condition.type == "PodScheduled"
+                            and condition.status == "False"
+                        ):
+                            detail = (
+                                condition.message or condition.reason or "unspecified"
                             )
+                            unsched_messages.append(detail)
+                    if unsched_messages:
+                        condensed = "; ".join(sorted(set(unsched_messages)))
+                        if condensed != last_unsched_message:
+                            print(
+                                f"Pod {container_name} pending scheduling: {condensed}"
+                            )
+                            last_unsched_message = condensed
 
-                time.sleep(1)
+                if (time.time() - start_time) >= self.POD_READY_TIMEOUT_SECONDS:
+                    self._log_pod_events(k8v1api, container_name)
+                    raise RuntimeError(
+                        f"Pod {container_name} did not become ready within {self.POD_READY_TIMEOUT_SECONDS}s"
+                    )
+
+                time.sleep(self.POD_POLL_INTERVAL_SECONDS)
             except Exception as e:
-                print(f"Waiting for pod to start (attempt {attempt + 1}/30): {e}")
-                time.sleep(1)
+                if isinstance(e, RuntimeError):
+                    raise
+                print(
+                    f"Waiting for pod to start (elapsed {int(time.time() - start_time)}s): {e}"
+                )
+                time.sleep(self.POD_POLL_INTERVAL_SECONDS)
 
         # Get and print pod logs for both containers
         try:
@@ -179,19 +226,7 @@ class Containers:
             print(f"Error retrieving container logs: {e}")
 
         # Get pod events for troubleshooting
-        try:
-            field_selector = f"involvedObject.name={container_name}"
-            events = k8v1api.list_namespaced_event(
-                namespace="default", field_selector=field_selector
-            )
-            if events.items:
-                print(f"Events for pod {container_name}:")
-                for event in events.items:
-                    print(f"  {event.last_timestamp}: {event.reason} - {event.message}")
-            else:
-                print(f"No events found for pod {container_name}")
-        except Exception as e:
-            print(f"Error retrieving pod events: {e}")
+        self._log_pod_events(k8v1api, container_name)
 
         # Connect to the pod to check if it's working correctly
         resp = stream(
