@@ -9,6 +9,7 @@ This provides REST API endpoints and WebSocket connections for:
 """
 
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -109,7 +110,7 @@ ConnectionId = str  # Unique ID for each WebSocket connection
 VALIDATOR_MESSAGE_QUEUE_MAXSIZE = 5000
 VALIDATOR_MESSAGE_BATCH_SIZE = 50
 VALIDATOR_MESSAGE_BATCH_INTERVAL = 0.5
-VALIDATOR_MESSAGE_WORKERS = 2
+DEFAULT_VALIDATOR_MESSAGE_WORKERS = max(1, (os.cpu_count() or 1) * 2 + 1)
 
 
 class LeaderCandidateError(Exception):
@@ -236,6 +237,11 @@ class BackendService:
         # Thread pool for blocking operations
         self.thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
+        self._default_validator_worker_count = DEFAULT_VALIDATOR_MESSAGE_WORKERS
+        self.validator_worker_count = self._resolve_validator_worker_count(
+            config.settings.get("validator_message_workers")
+        )
+
         # Validator message processing
         self._validator_message_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(
             maxsize=VALIDATOR_MESSAGE_QUEUE_MAXSIZE
@@ -285,6 +291,40 @@ class BackendService:
                 continue
 
         return False
+
+    def _resolve_validator_worker_count(self, configured_value: Any) -> int:
+        """Determine validator worker pool size from config or CPU count."""
+
+        default_workers = self._default_validator_worker_count
+
+        if configured_value is None:
+            logger.info(
+                "Validator message workers defaulting to %s (cpu cores=%s)",
+                default_workers,
+                os.cpu_count() or 1,
+            )
+            return default_workers
+
+        try:
+            workers = int(configured_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid validator_message_workers value %r; using default %s",
+                configured_value,
+                default_workers,
+            )
+            return default_workers
+
+        if workers <= 0:
+            logger.info(
+                "validator_message_workers <= 0 (got %s); using default %s",
+                workers,
+                default_workers,
+            )
+            return default_workers
+
+        logger.info("Validator message workers set to %s", workers)
+        return workers
 
     async def create_submission_upload(
         self,
@@ -405,7 +445,7 @@ class BackendService:
         )
         self._stale_job_monitor_task = asyncio.create_task(self._monitor_stale_jobs())
 
-        for worker_id in range(VALIDATOR_MESSAGE_WORKERS):
+        for worker_id in range(self.validator_worker_count):
             worker_task = asyncio.create_task(self._validator_message_worker(worker_id))
             self._validator_worker_tasks.append(worker_task)
 

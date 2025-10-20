@@ -55,3 +55,10 @@ class BackendConfig(Config):
             help="Seconds between chain sync operations",
             default=self.settings.get("chain_sync_interval", 30),
         )
+
+        self._parser.add_argument(
+            "--validator-message-workers",
+            type=int,
+            help="Number of validator message worker tasks (<=0 uses CPU-based default)",
+            default=self.settings.get("validator_message_workers"),
+        )

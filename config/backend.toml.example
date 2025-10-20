@@ -11,6 +11,10 @@ websocket_port = 8080
 max_commitment_lookback = 360
 chain_sync_interval = 30  # seconds between chain scans
 
+# Validator message worker configuration
+# Set to 0 or omit to use the automatic value (2 * cpu cores + 1)
+# validator_message_workers = 0
+
 [subtensor]
 network = "local"
 address = "ws://127.0.0.1:9944"
