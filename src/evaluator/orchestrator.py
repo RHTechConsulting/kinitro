@@ -601,7 +601,37 @@ class Orchestrator:
         try:
             job_context = await self.setup_job(job)
         except Exception as e:
-            logger.error(f"Failed to process job {getattr(job, 'id', 'unknown')}: {e}")
+            job_id = getattr(job, "id", "unknown")
+            logger.error(f"Failed to process job {job_id}: {e}")
+
+            # Attempt to mark the evaluation job as failed and notify backend
+            try:
+                if job.payload:
+                    eval_job_msg = EvalJobMessage.from_bytes(job.payload)
+                    failure_detail = f"Container setup failed: {e}"
+                    self.db.update_evaluation_job(
+                        eval_job_msg.job_id,
+                        {
+                            "status": EvaluationStatus.FAILED,
+                            "error_message": failure_detail,
+                            "completed_at": datetime.now(timezone.utc),
+                        },
+                    )
+
+                    status_msg = JobStatusUpdateMessage(
+                        job_id=eval_job_msg.job_id,
+                        validator_hotkey=self.keypair.ss58_address,
+                        status=EvaluationStatus.FAILED,
+                        detail=failure_detail,
+                    )
+                    await self.db.queue_job_status_update_msg(status_msg)
+            except Exception as status_err:
+                logger.error(
+                    "Failed to publish failure status for job %s: %s",
+                    job_id,
+                    status_err,
+                )
+
             self.concurrent_slots.release()
             return
 
