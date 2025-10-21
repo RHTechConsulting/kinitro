@@ -901,10 +901,12 @@ class BackendService:
                 return datetime.fromisoformat(value)
             raise ValueError(f"Unsupported datetime value: {value!r}")
 
-        episode_payload_map: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
-        step_payload_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = (
-            defaultdict(list)
-        )
+        episode_payload_map: Dict[
+            Tuple[str, int, str, SS58Address], Dict[str, Any]
+        ] = {}
+        step_payload_map: Dict[
+            Tuple[str, int, str, SS58Address], List[Dict[str, Any]]
+        ] = defaultdict(list)
 
         for item in batch:
             message_type = item.get("type")
@@ -916,7 +918,13 @@ class BackendService:
                     heartbeats[hotkey] = timestamp
             elif message_type == "episode_data":
                 message: EpisodeDataMessage = item["message"]
-                key = (message.submission_id, message.episode_id, message.task_id)
+                validator_hotkey: SS58Address = item["validator_hotkey"]
+                key = (
+                    message.submission_id,
+                    message.episode_id,
+                    message.task_id,
+                    validator_hotkey,
+                )
                 existing = episode_payload_map.get(key)
                 if existing is not None:
                     existing_msg: EpisodeDataMessage = existing["message"]
@@ -935,7 +943,13 @@ class BackendService:
                 episode_payload_map[key] = item
             elif message_type == "episode_step_data":
                 message: EpisodeStepDataMessage = item["message"]
-                key = (message.submission_id, message.episode_id, message.task_id)
+                validator_hotkey: SS58Address = item["validator_hotkey"]
+                key = (
+                    message.submission_id,
+                    message.episode_id,
+                    message.task_id,
+                    validator_hotkey,
+                )
                 step_payload_map[key].append(item)
             else:
                 logger.warning("Unknown validator message type: %s", message_type)
@@ -947,7 +961,7 @@ class BackendService:
 
         all_episode_keys = sorted(
             set(episode_payload_map.keys()) | set(step_payload_map.keys()),
-            key=lambda k: (k[0], k[2], k[1]),
+            key=lambda k: (k[0], k[2], k[1], k[3]),
         )
 
         def _episode_lock_key(
@@ -965,10 +979,15 @@ class BackendService:
         async def _ensure_episode(
             message: EpisodeDataMessage,
             validator_hotkey: SS58Address,
-            lookup: Dict[tuple[str, int, str], int],
+            lookup: Dict[tuple[str, int, str, SS58Address], int],
             session: AsyncSession,
         ) -> int:
-            key = (message.submission_id, message.episode_id, message.task_id)
+            key = (
+                message.submission_id,
+                message.episode_id,
+                message.task_id,
+                validator_hotkey,
+            )
             existing_id = lookup.get(key)
             if existing_id is not None:
                 return existing_id
@@ -998,6 +1017,7 @@ class BackendService:
                         "submission_id",
                         "task_id",
                         "episode_id",
+                        "validator_hotkey",
                     ],
                     set_={
                         "job_id": episode_values["job_id"],
@@ -1031,7 +1051,7 @@ class BackendService:
                 status_update_keys: set[tuple[Any, SS58Address]] = set()
 
                 async with self.async_session() as session:
-                    episode_lookup: Dict[tuple[str, int, str], int] = {}
+                    episode_lookup: Dict[tuple[str, int, str, SS58Address], int] = {}
 
                     if heartbeats:
                         result = await session.execute(
@@ -1056,7 +1076,8 @@ class BackendService:
                         if not episode_payload and not step_payloads:
                             continue
 
-                        submission_id, episode_id_value, task_id = key
+                        # Keys include validator hotkey; lock only needs submission/task/episode
+                        submission_id, episode_id_value, task_id, _key_hotkey = key
                         lock_k1, lock_k2 = _episode_lock_key(
                             submission_id, task_id, episode_id_value
                         )

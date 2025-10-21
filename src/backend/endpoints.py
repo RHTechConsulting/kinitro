@@ -1620,9 +1620,10 @@ async def validator_websocket(websocket: WebSocket):
                 await backend_service.queue_episode_data(validator_hotkey, episode_msg)
 
                 logger.debug(
-                    "Queued episode data from %s for episode %s",
+                    "Queued episode data from %s for episode %s for submission %s",
                     validator_hotkey,
                     episode_msg.episode_id,
+                    episode_msg.submission_id,
                 )
 
             elif message_type == MessageType.EPISODE_STEP_DATA:

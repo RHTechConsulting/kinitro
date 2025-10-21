@@ -741,7 +741,8 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
             "submission_id",
             "task_id",
             "episode_id",
-            name="uq_episode_data_submission_task_episode",
+            "validator_hotkey",
+            name="uq_episode_data_submission_task_episode_validator",
         ),
     )
 
