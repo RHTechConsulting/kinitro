@@ -37,7 +37,7 @@ INITIAL_STATE_DATA_LIMIT = 50  # Default limit for initial state data queries
 # Hold-out system defaults
 DEFAULT_SUBMISSION_HOLDOUT_SECONDS = 300  # 5 minutes private window
 SUBMISSION_UPLOAD_URL_TTL_SECONDS = 600  # Presigned PUT validity (10 minutes)
-SUBMISSION_DOWNLOAD_URL_TTL_SECONDS = 900  # Signed GET validity (15 minutes)
+SUBMISSION_DOWNLOAD_URL_TTL_SECONDS = 21600  # Signed GET validity (6 hours)
 HOLDOUT_RELEASE_SCAN_INTERVAL = 300  # Poll every 5 minutes
 # TODO: increase presigned url ttl?
 SUBMISSION_RELEASE_URL_TTL_SECONDS = 86400  # Release URL validity (24 hours)
