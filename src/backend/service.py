@@ -23,6 +23,7 @@ from fiber.chain.interface import get_substrate
 from fiber.chain.models import Node
 from snowflake import SnowflakeGenerator
 from sqlalchemy import and_, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -32,10 +33,10 @@ from sqlalchemy.ext.asyncio import (
 
 from backend.constants import (
     CHAIN_SCAN_YIELD_INTERVAL,
+    DEFAULT_BURN_PCT,
     DEFAULT_CHAIN_SYNC_INTERVAL,
     DEFAULT_MAX_COMMITMENT_LOOKBACK,
     DEFAULT_OWNER_UID,
-    DEFAULT_BURN_PCT,
     EVAL_JOB_TIMEOUT,
     HEARTBEAT_INTERVAL,
     HOLDOUT_RELEASE_SCAN_INTERVAL,
@@ -913,7 +914,68 @@ class BackendService:
         def _ensure_datetime(value: Any) -> datetime:
             if isinstance(value, datetime):
                 return value
-            return datetime.fromisoformat(value)
+            if isinstance(value, str):
+                return datetime.fromisoformat(value)
+            raise ValueError(f"Unsupported datetime value: {value!r}")
+
+        async def _ensure_episode(
+            message: EpisodeDataMessage,
+            validator_hotkey: SS58Address,
+            lookup: Dict[tuple[str, int, str], int],
+            session: AsyncSession,
+        ) -> int:
+            key = (message.submission_id, message.episode_id, message.task_id)
+            existing_id = lookup.get(key)
+            if existing_id is not None:
+                return existing_id
+
+            episode_values = {
+                "id": next(self.id_generator),
+                "job_id": message.job_id,
+                "submission_id": message.submission_id,
+                "validator_hotkey": validator_hotkey,
+                "task_id": message.task_id,
+                "episode_id": message.episode_id,
+                "env_name": message.env_name,
+                "benchmark_name": message.benchmark_name,
+                "final_reward": message.final_reward,
+                "success": message.success,
+                "steps": message.steps,
+                "start_time": _ensure_datetime(message.start_time),
+                "end_time": _ensure_datetime(message.end_time),
+                "extra_metrics": message.extra_metrics,
+            }
+
+            episode_insert = (
+                insert(episode_table)
+                .values(**episode_values)
+                .on_conflict_do_update(
+                    index_elements=[
+                        "submission_id",
+                        "task_id",
+                        "episode_id",
+                    ],
+                    set_={
+                        "job_id": episode_values["job_id"],
+                        "validator_hotkey": episode_values["validator_hotkey"],
+                        "env_name": episode_values["env_name"],
+                        "benchmark_name": episode_values["benchmark_name"],
+                        "final_reward": episode_values["final_reward"],
+                        "success": episode_values["success"],
+                        "steps": episode_values["steps"],
+                        "start_time": episode_values["start_time"],
+                        "end_time": episode_values["end_time"],
+                        "extra_metrics": episode_values["extra_metrics"],
+                        "updated_at": func.now(),
+                    },
+                )
+                .returning(episode_table.c.id)
+            )
+
+            result = await session.execute(episode_insert)
+            episode_db_id = result.scalar_one()
+            lookup[key] = episode_db_id
+            return episode_db_id
 
         async with self.async_session() as session:
             if heartbeats:
@@ -927,38 +989,18 @@ class BackendService:
                     validator.last_heartbeat = heartbeats[validator.validator_hotkey]
                     validator.is_connected = True
 
-            episode_lookup: Dict[tuple[str, int, str], EpisodeData] = {}
+            episode_lookup: Dict[tuple[str, int, str], int] = {}
+            episode_table = EpisodeData.__table__
+            step_table = EpisodeStepData.__table__
 
             if episodes:
                 for payload in episodes:
                     message: EpisodeDataMessage = payload["message"]
                     validator_hotkey: SS58Address = payload["validator_hotkey"]
 
-                    episode_record = EpisodeData(
-                        id=next(self.id_generator),
-                        job_id=message.job_id,
-                        submission_id=message.submission_id,
-                        validator_hotkey=validator_hotkey,
-                        task_id=message.task_id,
-                        episode_id=message.episode_id,
-                        env_name=message.env_name,
-                        benchmark_name=message.benchmark_name,
-                        final_reward=message.final_reward,
-                        success=message.success,
-                        steps=message.steps,
-                        start_time=_ensure_datetime(message.start_time),
-                        end_time=_ensure_datetime(message.end_time),
-                        extra_metrics=message.extra_metrics,
+                    episode_db_id = await _ensure_episode(
+                        message, validator_hotkey, episode_lookup, session
                     )
-
-                    session.add(episode_record)
-                    episode_lookup[
-                        (
-                            message.submission_id,
-                            message.episode_id,
-                            message.task_id,
-                        )
-                    ] = episode_record
 
                     pending_events.append(
                         (
@@ -1006,8 +1048,6 @@ class BackendService:
                         )
                         status_update_keys.add(status_key)
 
-                await session.flush()
-
             if steps:
                 for payload in steps:
                     message: EpisodeStepDataMessage = payload["message"]
@@ -1018,43 +1058,70 @@ class BackendService:
                         message.episode_id,
                         message.task_id,
                     )
-                    episode_record = episode_lookup.get(lookup_key)
+                    episode_id = episode_lookup.get(lookup_key)
 
-                    if not episode_record:
-                        episode_result = await session.execute(
-                            select(EpisodeData).where(
-                                EpisodeData.submission_id == message.submission_id,
-                                EpisodeData.episode_id == message.episode_id,
-                                EpisodeData.task_id == message.task_id,
-                            )
+                    if episode_id is None:
+                        episode_data_message = EpisodeDataMessage(
+                            job_id=message.job_id,
+                            submission_id=message.submission_id,
+                            validator_hotkey=validator_hotkey,
+                            task_id=message.task_id,
+                            episode_id=message.episode_id,
+                            env_name=message.env_name,
+                            benchmark_name=message.benchmark_name,
+                            final_reward=message.reward,
+                            success=message.done,
+                            steps=message.step,
+                            start_time=_ensure_datetime(message.step_timestamp),
+                            end_time=_ensure_datetime(message.step_timestamp),
+                            extra_metrics=None,
                         )
-                        episode_record = episode_result.scalar_one_or_none()
 
-                    if not episode_record:
-                        logger.warning(
-                            "Episode not found for step data: submission %s episode %s",
-                            message.submission_id,
-                            message.episode_id,
+                        episode_id = await _ensure_episode(
+                            episode_data_message,
+                            validator_hotkey,
+                            episode_lookup,
+                            session,
                         )
-                        continue
 
-                    step_record = EpisodeStepData(
-                        id=next(self.id_generator),
-                        episode_id=episode_record.id,
-                        submission_id=message.submission_id,
-                        validator_hotkey=validator_hotkey,
-                        task_id=message.task_id,
-                        step=message.step,
-                        action=message.action,
-                        reward=message.reward,
-                        done=message.done,
-                        truncated=message.truncated,
-                        observation_refs=message.observation_refs,
-                        info=message.info,
-                        timestamp=_ensure_datetime(message.step_timestamp),
+                    step_values = {
+                        "id": next(self.id_generator),
+                        "episode_id": episode_id,
+                        "submission_id": message.submission_id,
+                        "validator_hotkey": validator_hotkey,
+                        "task_id": message.task_id,
+                        "step": message.step,
+                        "action": message.action,
+                        "reward": message.reward,
+                        "done": message.done,
+                        "truncated": message.truncated,
+                        "observation_refs": message.observation_refs,
+                        "info": message.info,
+                        "timestamp": _ensure_datetime(message.step_timestamp),
+                    }
+
+                    step_insert = (
+                        insert(step_table)
+                        .values(**step_values)
+                        .on_conflict_do_update(
+                            index_elements=["episode_id", "step"],
+                            set_={
+                                "submission_id": step_values["submission_id"],
+                                "validator_hotkey": step_values["validator_hotkey"],
+                                "task_id": step_values["task_id"],
+                                "action": step_values["action"],
+                                "reward": step_values["reward"],
+                                "done": step_values["done"],
+                                "truncated": step_values["truncated"],
+                                "observation_refs": step_values["observation_refs"],
+                                "info": step_values["info"],
+                                "timestamp": step_values["timestamp"],
+                                "updated_at": func.now(),
+                            },
+                        )
                     )
 
-                    session.add(step_record)
+                    await session.execute(step_insert)
 
                     pending_events.append(
                         (

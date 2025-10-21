@@ -161,14 +161,14 @@ class ClientConnection:
         """
         matching_subscriptions = []
 
-        logger.debug(
+        logger.trace(
             f"Client {self.connection_id} checking event {event_type} against {len(self.subscriptions)} subscriptions"
         )
 
         for sub_id, subscription in self.subscriptions.items():
             # Check if event type is subscribed
             if event_type not in subscription.event_types:
-                logger.debug(
+                logger.trace(
                     f"Subscription {sub_id} does not include event type {event_type}"
                 )
                 continue
@@ -179,16 +179,16 @@ class ClientConnection:
                 if filter_key in event_data:
                     if event_data[filter_key] != filter_value:
                         matches = False
-                        logger.debug(
+                        logger.trace(
                             f"Filter mismatch: {filter_key}={event_data[filter_key]} != {filter_value}"
                         )
                         break
 
             if matches:
                 matching_subscriptions.append(sub_id)
-                logger.debug(f"Subscription {sub_id} matches event {event_type}")
+                logger.trace(f"Subscription {sub_id} matches event {event_type}")
 
-        logger.debug(
+        logger.trace(
             f"Client {self.connection_id} has {len(matching_subscriptions)} matching subscriptions"
         )
         return matching_subscriptions
@@ -328,7 +328,7 @@ class RealtimeEventBroadcaster:
         else:
             event_data_dict = event_data
 
-        logger.debug(
+        logger.trace(
             f"Broadcasting event: {event_type} to {len(self.client_connections)} clients"
         )
         await self._broadcast_queue.put((event_type, event_data_dict))
@@ -356,7 +356,7 @@ class RealtimeEventBroadcaster:
                     self._broadcast_queue.get(), timeout=1.0
                 )
 
-                logger.debug(
+                logger.trace(
                     f"Processing event: {event_type} for {len(self.client_connections)} clients"
                 )
 
@@ -388,16 +388,16 @@ class RealtimeEventBroadcaster:
                             break
 
                         sent_count += 1
-                        logger.debug(
+                        logger.trace(
                             f"Queued {event_type} event to client {connection_id}"
                         )
 
                 if sent_count > 0:
-                    logger.debug(
+                    logger.trace(
                         f"Successfully sent {event_type} event to {sent_count} clients"
                     )
                 else:
-                    logger.debug(f"No clients subscribed to {event_type} event")
+                    logger.trace(f"No clients subscribed to {event_type} event")
 
             except asyncio.TimeoutError:
                 continue
@@ -471,7 +471,7 @@ class RealtimeEventBroadcaster:
             logger.info(
                 f"Client {connection.connection_id} subscribed to {msg.subscription.event_types} with subscription {subscription_id}"
             )
-            logger.debug(
+            logger.trace(
                 f"Client {connection.connection_id} now has {len(connection.subscriptions)} subscriptions"
             )
 
@@ -516,7 +516,7 @@ class RealtimeEventBroadcaster:
     ):
         """Send initial state data for applicable event types after subscription."""
         if not self.backend_service or not self.backend_service.async_session:
-            logger.debug(
+            logger.trace(
                 "No backend service or database session available for initial state data"
             )
             return
@@ -539,7 +539,7 @@ class RealtimeEventBroadcaster:
                             await self._queue_payload_for_client(
                                 connection, message.model_dump_json()
                             )
-                            logger.debug(
+                            logger.trace(
                                 f"Sent initial state data for {event_type} to client {connection.connection_id}"
                             )
 
@@ -599,7 +599,7 @@ class RealtimeEventBroadcaster:
 
             # Unknown event types
             else:
-                logger.debug(
+                logger.trace(
                     f"No initial state data handler for event type: {event_type}"
                 )
                 return []
