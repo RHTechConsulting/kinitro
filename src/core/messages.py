@@ -208,6 +208,8 @@ class EpisodeStepDataMessage(SQLModel):
 
     message_type: MessageType = MessageType.EPISODE_STEP_DATA
     job_id: SnowflakeId
+    env_name: str
+    benchmark_name: str
     submission_id: str
     task_id: str  # Unique identifier for the task within the job
     episode_id: int
