@@ -1,5 +1,6 @@
 import os
 import time
+from typing import Optional
 
 import dotenv
 import yaml
@@ -12,12 +13,21 @@ from core.db.models import SnowflakeId
 dotenv.load_dotenv()
 
 
+class PodSchedulingError(RuntimeError):
+    """Raised when a pod cannot be scheduled due to cluster resource limits."""
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class Containers:
     DELETE_TIMEOUT_SECONDS = 60
     DELETE_RETRY_INTERVAL = 5
     CONTAINER_RETRY_COUNT = 2
     POD_READY_TIMEOUT_SECONDS = 600
     POD_POLL_INTERVAL_SECONDS = 2.0
+    POD_UNSCHEDULABLE_GRACE_SECONDS = 10
 
     @staticmethod
     def _set_env(container_spec: dict, name: str, value: str | None) -> None:
@@ -196,6 +206,7 @@ class Containers:
             start_time = time.time()
             last_phase = None
             last_unsched_message = None
+            unsched_since: Optional[float] = None
 
             while True:
                 try:
@@ -236,6 +247,20 @@ class Containers:
                                     f"Pod {container_name} pending scheduling: {condensed}"
                                 )
                                 last_unsched_message = condensed
+                                unsched_since = time.time()
+                            elif unsched_since is None:
+                                unsched_since = time.time()
+
+                            if (
+                                unsched_since is not None
+                                and time.time() - unsched_since
+                                >= self.POD_UNSCHEDULABLE_GRACE_SECONDS
+                            ):
+                                raise PodSchedulingError(
+                                    f"Pod {container_name} unschedulable: {condensed}"
+                                )
+                        else:
+                            unsched_since = None
 
                     if (time.time() - start_time) >= self.POD_READY_TIMEOUT_SECONDS:
                         self._log_pod_events(k8v1api, container_name)

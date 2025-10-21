@@ -18,7 +18,7 @@ from core.db.models import EvaluationStatus
 from core.log import get_logger
 from core.messages import EvalJobMessage, EvalResultMessage, JobStatusUpdateMessage
 from evaluator.config import EvaluatorConfig
-from evaluator.containers import Containers
+from evaluator.containers import Containers, PodSchedulingError
 from evaluator.rollout import BenchmarkSpec, RolloutCluster
 from evaluator.rollout.envs import EnvResult
 from evaluator.rpc.rpc_process import RPCProcess
@@ -34,6 +34,7 @@ QUEUE_MAXSIZE = 100
 EVAL_TIMEOUT = 900
 RAY_WAIT_TIMEOUT = 0.1
 MIN_CONCURRENT_JOBS = 4
+RESOURCE_BACKOFF_SECONDS = 15
 
 
 class Orchestrator:
@@ -600,6 +601,48 @@ class Orchestrator:
 
         try:
             job_context = await self.setup_job(job)
+        except PodSchedulingError as e:
+            job_id = getattr(job, "id", "unknown")
+            logger.warning("Insufficient cluster resources for job %s: %s", job_id, e)
+
+            if job.payload:
+                try:
+                    eval_job_msg = EvalJobMessage.from_bytes(job.payload)
+                    backoff_detail = (
+                        f"Waiting for cluster capacity: {e}" if str(e) else None
+                    )
+                    self.db.update_evaluation_job(
+                        eval_job_msg.job_id,
+                        {
+                            "status": EvaluationStatus.QUEUED,
+                            "error_message": backoff_detail,
+                            "started_at": None,
+                            "completed_at": None,
+                        },
+                    )
+
+                    status_msg = JobStatusUpdateMessage(
+                        job_id=eval_job_msg.job_id,
+                        validator_hotkey=self.keypair.ss58_address,
+                        status=EvaluationStatus.QUEUED,
+                        detail=backoff_detail,
+                    )
+                    await self.db.queue_job_status_update_msg(status_msg)
+
+                    logger.info(
+                        "Requeueing job %s after resource backoff", eval_job_msg.job_id
+                    )
+                    await asyncio.sleep(RESOURCE_BACKOFF_SECONDS)
+                    await self._enqueue_job_for_processing(eval_job_msg)
+                except Exception as requeue_err:
+                    logger.error(
+                        "Failed to requeue job %s after resource shortfall: %s",
+                        job_id,
+                        requeue_err,
+                    )
+
+            self.concurrent_slots.release()
+            return
         except Exception as e:
             job_id = getattr(job, "id", "unknown")
             logger.error(f"Failed to process job {job_id}: {e}")
