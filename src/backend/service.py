@@ -9,12 +9,15 @@ This provides REST API endpoints and WebSocket connections for:
 """
 
 import asyncio
+import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 
 import dotenv
+from asyncpg.exceptions import DeadlockDetectedError
 from fastapi import (
     WebSocket,
 )
@@ -22,8 +25,9 @@ from fiber.chain.fetch_nodes import _get_nodes_for_uid
 from fiber.chain.interface import get_substrate
 from fiber.chain.models import Node
 from snowflake import SnowflakeGenerator
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -889,8 +893,18 @@ class BackendService:
             return
 
         heartbeats: Dict[SS58Address, datetime] = {}
-        episodes: List[Dict[str, Any]] = []
-        steps: List[Dict[str, Any]] = []
+
+        def _ensure_datetime(value: Any) -> datetime:
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, str):
+                return datetime.fromisoformat(value)
+            raise ValueError(f"Unsupported datetime value: {value!r}")
+
+        episode_payload_map: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+        step_payload_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = (
+            defaultdict(list)
+        )
 
         for item in batch:
             message_type = item.get("type")
@@ -901,22 +915,52 @@ class BackendService:
                 if current is None or timestamp > current:
                     heartbeats[hotkey] = timestamp
             elif message_type == "episode_data":
-                episodes.append(item)
+                message: EpisodeDataMessage = item["message"]
+                key = (message.submission_id, message.episode_id, message.task_id)
+                existing = episode_payload_map.get(key)
+                if existing is not None:
+                    existing_msg: EpisodeDataMessage = existing["message"]
+                    existing_score = (
+                        _ensure_datetime(existing_msg.end_time),
+                        _ensure_datetime(existing_msg.start_time),
+                        existing_msg.steps,
+                    )
+                    new_score = (
+                        _ensure_datetime(message.end_time),
+                        _ensure_datetime(message.start_time),
+                        message.steps,
+                    )
+                    if new_score <= existing_score:
+                        continue
+                episode_payload_map[key] = item
             elif message_type == "episode_step_data":
-                steps.append(item)
+                message: EpisodeStepDataMessage = item["message"]
+                key = (message.submission_id, message.episode_id, message.task_id)
+                step_payload_map[key].append(item)
             else:
                 logger.warning("Unknown validator message type: %s", message_type)
 
-        pending_events: List[tuple[EventType, Any]] = []
-        status_updates: List[Dict[str, Any]] = []
-        status_update_keys: set[tuple[Any, SS58Address]] = set()
+        step_payload_map = {
+            key: sorted(payloads, key=lambda payload: payload["message"].step)
+            for key, payloads in step_payload_map.items()
+        }
 
-        def _ensure_datetime(value: Any) -> datetime:
-            if isinstance(value, datetime):
-                return value
-            if isinstance(value, str):
-                return datetime.fromisoformat(value)
-            raise ValueError(f"Unsupported datetime value: {value!r}")
+        all_episode_keys = sorted(
+            set(episode_payload_map.keys()) | set(step_payload_map.keys()),
+            key=lambda k: (k[0], k[2], k[1]),
+        )
+
+        def _episode_lock_key(
+            submission_id: str, task_id: str, episode_id: int
+        ) -> tuple[int, int]:
+            data = f"{submission_id}|{task_id}|{episode_id}".encode("utf-8")
+            digest = hashlib.blake2b(data, digest_size=8).digest()
+            part1 = int.from_bytes(digest[:4], "big", signed=True)
+            part2 = int.from_bytes(digest[4:], "big", signed=True)
+            return part1, part2
+
+        episode_table = EpisodeData.__table__
+        step_table = EpisodeStepData.__table__
 
         async def _ensure_episode(
             message: EpisodeDataMessage,
@@ -977,190 +1021,277 @@ class BackendService:
             lookup[key] = episode_db_id
             return episode_db_id
 
-        async with self.async_session() as session:
-            if heartbeats:
-                result = await session.execute(
-                    select(ValidatorConnection).where(
-                        ValidatorConnection.validator_hotkey.in_(heartbeats.keys())
-                    )
-                )
+        max_retries = 5
+        attempt = 0
 
-                for validator in result.scalars():
-                    validator.last_heartbeat = heartbeats[validator.validator_hotkey]
-                    validator.is_connected = True
+        while True:
+            try:
+                pending_events: List[tuple[EventType, Any]] = []
+                status_updates: List[Dict[str, Any]] = []
+                status_update_keys: set[tuple[Any, SS58Address]] = set()
 
-            episode_lookup: Dict[tuple[str, int, str], int] = {}
-            episode_table = EpisodeData.__table__
-            step_table = EpisodeStepData.__table__
+                async with self.async_session() as session:
+                    episode_lookup: Dict[tuple[str, int, str], int] = {}
 
-            if episodes:
-                for payload in episodes:
-                    message: EpisodeDataMessage = payload["message"]
-                    validator_hotkey: SS58Address = payload["validator_hotkey"]
-
-                    episode_db_id = await _ensure_episode(
-                        message, validator_hotkey, episode_lookup, session
-                    )
-
-                    pending_events.append(
-                        (
-                            EventType.EPISODE_COMPLETED,
-                            EpisodeCompletedEvent(
-                                job_id=message.job_id,
-                                submission_id=message.submission_id,
-                                validator_hotkey=validator_hotkey,
-                                episode_id=message.episode_id,
-                                env_name=message.env_name,
-                                benchmark_name=message.benchmark_name,
-                                final_reward=message.final_reward,
-                                success=message.success,
-                                steps=message.steps,
-                                start_time=_ensure_datetime(message.start_time),
-                                end_time=_ensure_datetime(message.end_time),
-                                extra_metrics=message.extra_metrics,
-                                created_at=datetime.now(timezone.utc),
-                            ),
-                        ),
-                    )
-
-                    status_result = await session.execute(
-                        select(BackendEvaluationJobStatus).where(
-                            BackendEvaluationJobStatus.job_id == message.job_id,
-                            BackendEvaluationJobStatus.validator_hotkey
-                            == validator_hotkey,
-                            BackendEvaluationJobStatus.status
-                            == EvaluationStatus.RUNNING,
+                    if heartbeats:
+                        result = await session.execute(
+                            select(ValidatorConnection).where(
+                                ValidatorConnection.validator_hotkey.in_(
+                                    heartbeats.keys()
+                                )
+                            )
                         )
-                    )
 
-                    if not status_result.scalar_one_or_none():
-                        status_key = (message.job_id, validator_hotkey)
-                        if status_key in status_update_keys:
+                        for validator in result.scalars():
+                            validator.last_heartbeat = heartbeats[
+                                validator.validator_hotkey
+                            ]
+                            validator.is_connected = True
+
+                        await session.commit()
+
+                    for key in all_episode_keys:
+                        episode_payload = episode_payload_map.get(key)
+                        step_payloads = step_payload_map.get(key, [])
+                        if not episode_payload and not step_payloads:
                             continue
 
-                        status_updates.append(
-                            {
-                                "job_id": message.job_id,
+                        submission_id, episode_id_value, task_id = key
+                        lock_k1, lock_k2 = _episode_lock_key(
+                            submission_id, task_id, episode_id_value
+                        )
+                        await session.execute(
+                            text("SELECT pg_advisory_xact_lock(:k1, :k2)"),
+                            {"k1": lock_k1, "k2": lock_k2},
+                        )
+
+                        current_episode_id = episode_lookup.get(key)
+
+                        if episode_payload:
+                            message: EpisodeDataMessage = episode_payload["message"]
+                            validator_hotkey: SS58Address = episode_payload[
+                                "validator_hotkey"
+                            ]
+
+                            current_episode_id = await _ensure_episode(
+                                message,
+                                validator_hotkey,
+                                episode_lookup,
+                                session,
+                            )
+
+                            pending_events.append(
+                                (
+                                    EventType.EPISODE_COMPLETED,
+                                    EpisodeCompletedEvent(
+                                        job_id=message.job_id,
+                                        submission_id=message.submission_id,
+                                        validator_hotkey=validator_hotkey,
+                                        episode_id=message.episode_id,
+                                        env_name=message.env_name,
+                                        benchmark_name=message.benchmark_name,
+                                        final_reward=message.final_reward,
+                                        success=message.success,
+                                        steps=message.steps,
+                                        start_time=_ensure_datetime(message.start_time),
+                                        end_time=_ensure_datetime(message.end_time),
+                                        extra_metrics=message.extra_metrics,
+                                        created_at=datetime.now(timezone.utc),
+                                    ),
+                                ),
+                            )
+
+                            status_result = await session.execute(
+                                select(BackendEvaluationJobStatus).where(
+                                    BackendEvaluationJobStatus.job_id == message.job_id,
+                                    BackendEvaluationJobStatus.validator_hotkey
+                                    == validator_hotkey,
+                                    BackendEvaluationJobStatus.status
+                                    == EvaluationStatus.RUNNING,
+                                )
+                            )
+
+                            if not status_result.scalar_one_or_none():
+                                status_key = (message.job_id, validator_hotkey)
+                                if status_key not in status_update_keys:
+                                    status_updates.append(
+                                        {
+                                            "job_id": message.job_id,
+                                            "validator_hotkey": validator_hotkey,
+                                            "status": EvaluationStatus.RUNNING,
+                                            "detail": f"Started processing episodes (episode {message.episode_id})",
+                                        }
+                                    )
+                                    status_update_keys.add(status_key)
+
+                        if current_episode_id is None and step_payloads:
+                            first_payload = step_payloads[0]
+                            first_step: EpisodeStepDataMessage = first_payload[
+                                "message"
+                            ]
+                            fallback_episode = EpisodeDataMessage(
+                                job_id=first_step.job_id,
+                                submission_id=first_step.submission_id,
+                                validator_hotkey=first_payload["validator_hotkey"],
+                                task_id=first_step.task_id,
+                                episode_id=first_step.episode_id,
+                                env_name=first_step.env_name,
+                                benchmark_name=first_step.benchmark_name,
+                                final_reward=first_step.reward,
+                                success=first_step.info.get("success", False),
+                                steps=first_step.step,
+                                start_time=_ensure_datetime(first_step.step_timestamp),
+                                end_time=_ensure_datetime(first_step.step_timestamp),
+                                extra_metrics=None,
+                            )
+                            current_episode_id = await _ensure_episode(
+                                fallback_episode,
+                                first_payload["validator_hotkey"],
+                                episode_lookup,
+                                session,
+                            )
+
+                        for step_payload in step_payloads:
+                            step_message: EpisodeStepDataMessage = step_payload[
+                                "message"
+                            ]
+                            validator_hotkey: SS58Address = step_payload[
+                                "validator_hotkey"
+                            ]
+
+                            episode_lookup_id = episode_lookup.get(key)
+                            if episode_lookup_id is None:
+                                fallback_episode = EpisodeDataMessage(
+                                    job_id=step_message.job_id,
+                                    submission_id=step_message.submission_id,
+                                    validator_hotkey=validator_hotkey,
+                                    task_id=step_message.task_id,
+                                    episode_id=step_message.episode_id,
+                                    env_name=step_message.env_name,
+                                    benchmark_name=step_message.benchmark_name,
+                                    final_reward=step_message.reward,
+                                    success=step_message.info.get("success", False),
+                                    steps=step_message.step,
+                                    start_time=_ensure_datetime(
+                                        step_message.step_timestamp
+                                    ),
+                                    end_time=_ensure_datetime(
+                                        step_message.step_timestamp
+                                    ),
+                                    extra_metrics=None,
+                                )
+                                episode_lookup_id = await _ensure_episode(
+                                    fallback_episode,
+                                    validator_hotkey,
+                                    episode_lookup,
+                                    session,
+                                )
+
+                            step_values = {
+                                "id": next(self.id_generator),
+                                "episode_id": episode_lookup_id,
+                                "submission_id": step_message.submission_id,
                                 "validator_hotkey": validator_hotkey,
-                                "status": EvaluationStatus.RUNNING,
-                                "detail": f"Started processing episodes (episode {message.episode_id})",
+                                "task_id": step_message.task_id,
+                                "step": step_message.step,
+                                "action": step_message.action,
+                                "reward": step_message.reward,
+                                "done": step_message.done,
+                                "truncated": step_message.truncated,
+                                "observation_refs": step_message.observation_refs,
+                                "info": step_message.info,
+                                "timestamp": _ensure_datetime(
+                                    step_message.step_timestamp
+                                ),
                             }
-                        )
-                        status_update_keys.add(status_key)
 
-            if steps:
-                for payload in steps:
-                    message: EpisodeStepDataMessage = payload["message"]
-                    validator_hotkey: SS58Address = payload["validator_hotkey"]
+                            step_insert = (
+                                insert(step_table)
+                                .values(**step_values)
+                                .on_conflict_do_update(
+                                    index_elements=["episode_id", "step"],
+                                    set_={
+                                        "submission_id": step_values["submission_id"],
+                                        "validator_hotkey": step_values[
+                                            "validator_hotkey"
+                                        ],
+                                        "task_id": step_values["task_id"],
+                                        "action": step_values["action"],
+                                        "reward": step_values["reward"],
+                                        "done": step_values["done"],
+                                        "truncated": step_values["truncated"],
+                                        "observation_refs": step_values[
+                                            "observation_refs"
+                                        ],
+                                        "info": step_values["info"],
+                                        "timestamp": step_values["timestamp"],
+                                        "updated_at": func.now(),
+                                    },
+                                )
+                            )
 
-                    lookup_key = (
-                        message.submission_id,
-                        message.episode_id,
-                        message.task_id,
-                    )
-                    episode_id = episode_lookup.get(lookup_key)
+                            await session.execute(step_insert)
 
-                    if episode_id is None:
-                        episode_data_message = EpisodeDataMessage(
-                            job_id=message.job_id,
-                            submission_id=message.submission_id,
-                            validator_hotkey=validator_hotkey,
-                            task_id=message.task_id,
-                            episode_id=message.episode_id,
-                            env_name=message.env_name,
-                            benchmark_name=message.benchmark_name,
-                            final_reward=message.reward,
-                            success=message.done,
-                            steps=message.step,
-                            start_time=_ensure_datetime(message.step_timestamp),
-                            end_time=_ensure_datetime(message.step_timestamp),
-                            extra_metrics=None,
-                        )
+                            pending_events.append(
+                                (
+                                    EventType.EPISODE_STEP,
+                                    EpisodeStepEvent(
+                                        submission_id=step_message.submission_id,
+                                        validator_hotkey=validator_hotkey,
+                                        episode_id=step_message.episode_id,
+                                        step=step_message.step,
+                                        action=step_message.action,
+                                        reward=step_message.reward,
+                                        done=step_message.done,
+                                        truncated=step_message.truncated,
+                                        observation_refs=step_message.observation_refs,
+                                        info=step_message.info,
+                                    ),
+                                )
+                            )
 
-                        episode_id = await _ensure_episode(
-                            episode_data_message,
-                            validator_hotkey,
-                            episode_lookup,
-                            session,
-                        )
+                        await session.commit()
 
-                    step_values = {
-                        "id": next(self.id_generator),
-                        "episode_id": episode_id,
-                        "submission_id": message.submission_id,
-                        "validator_hotkey": validator_hotkey,
-                        "task_id": message.task_id,
-                        "step": message.step,
-                        "action": message.action,
-                        "reward": message.reward,
-                        "done": message.done,
-                        "truncated": message.truncated,
-                        "observation_refs": message.observation_refs,
-                        "info": message.info,
-                        "timestamp": _ensure_datetime(message.step_timestamp),
-                    }
-
-                    step_insert = (
-                        insert(step_table)
-                        .values(**step_values)
-                        .on_conflict_do_update(
-                            index_elements=["episode_id", "step"],
-                            set_={
-                                "submission_id": step_values["submission_id"],
-                                "validator_hotkey": step_values["validator_hotkey"],
-                                "task_id": step_values["task_id"],
-                                "action": step_values["action"],
-                                "reward": step_values["reward"],
-                                "done": step_values["done"],
-                                "truncated": step_values["truncated"],
-                                "observation_refs": step_values["observation_refs"],
-                                "info": step_values["info"],
-                                "timestamp": step_values["timestamp"],
-                                "updated_at": func.now(),
-                            },
-                        )
+                for update in status_updates:
+                    await self._update_job_status(
+                        update["job_id"],
+                        update["validator_hotkey"],
+                        update["status"],
+                        update["detail"],
                     )
 
-                    await session.execute(step_insert)
+                for event_type, event_payload in pending_events:
+                    await event_broadcaster.broadcast_event(event_type, event_payload)
 
-                    pending_events.append(
-                        (
-                            EventType.EPISODE_STEP,
-                            EpisodeStepEvent(
-                                submission_id=message.submission_id,
-                                validator_hotkey=validator_hotkey,
-                                episode_id=message.episode_id,
-                                step=message.step,
-                                action=message.action,
-                                reward=message.reward,
-                                done=message.done,
-                                truncated=message.truncated,
-                                observation_refs=message.observation_refs,
-                                info=message.info,
-                            ),
-                        )
+                if heartbeats:
+                    logger.debug("Processed %s heartbeat updates", len(heartbeats))
+                if episode_payload_map:
+                    logger.info(
+                        "Persisted %s episode records", len(episode_payload_map)
+                    )
+                if step_payload_map:
+                    logger.debug(
+                        "Persisted %s episode step records",
+                        sum(len(payloads) for payloads in step_payload_map.values()),
                     )
 
-            if heartbeats or episodes or steps:
-                await session.commit()
-
-        for update in status_updates:
-            await self._update_job_status(
-                update["job_id"],
-                update["validator_hotkey"],
-                update["status"],
-                update["detail"],
-            )
-
-        for event_type, event_payload in pending_events:
-            await event_broadcaster.broadcast_event(event_type, event_payload)
-
-        if heartbeats:
-            logger.debug("Processed %s heartbeat updates", len(heartbeats))
-        if episodes:
-            logger.info("Persisted %s episode records", len(episodes))
-        if steps:
-            logger.debug("Persisted %s episode step records", len(steps))
+                break
+            except DBAPIError as exc:
+                if (
+                    isinstance(exc.orig, DeadlockDetectedError)
+                    and attempt < max_retries
+                ):
+                    attempt += 1
+                    delay = min(0.5 * attempt, 3.0)
+                    logger.warning(
+                        "Deadlock detected while processing validator batch (attempt %s/%s); retrying in %.2fs",
+                        attempt,
+                        max_retries,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
 
     async def _monitor_validator_heartbeats(self) -> None:
         """Monitor validator heartbeats and cleanup stale connections."""
