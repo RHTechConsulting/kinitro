@@ -9,11 +9,12 @@ This provides REST API endpoints and WebSocket connections for:
 """
 
 import asyncio
+import copy
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from collections import defaultdict
 
 import dotenv
@@ -128,6 +129,18 @@ class LeaderCandidateNotFoundError(LeaderCandidateError):
 
 class LeaderCandidateAlreadyReviewedError(LeaderCandidateError):
     """Raised when attempting to re-review a processed leader candidate."""
+
+
+class SubmissionNotFoundError(Exception):
+    """Raised when a submission cannot be located."""
+
+
+class EvaluationJobNotFoundError(Exception):
+    """Raised when an evaluation job cannot be located."""
+
+
+class NoBenchmarksAvailableError(Exception):
+    """Raised when no benchmarks are available for an evaluation rerun."""
 
 
 class BackendService:
@@ -1389,14 +1402,14 @@ class BackendService:
             return False
 
         if result.success_rate < competition.min_success_rate:
-            logger.debug(
+            logger.trace(
                 f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
                 f"success_rate={result.success_rate:.3f} < min_threshold={competition.min_success_rate:.3f}"
             )
             return False
 
         if result.avg_reward < competition.min_avg_reward:
-            logger.debug(
+            logger.trace(
                 f"Miner {result.miner_hotkey} excluded from competition {competition.id}: "
                 f"avg_reward={result.avg_reward:.3f} < min_threshold={competition.min_avg_reward}"
             )
@@ -2227,33 +2240,7 @@ class BackendService:
 
             session.add_all(jobs)
             await session.commit()
-
-            connected_validator_hotkeys = tuple(
-                dict.fromkeys(self.validator_connections.values())
-            )
-
-            for job in jobs:
-                job_event = JobCreatedEvent(
-                    job_id=str(job.id),
-                    competition_id=job.competition_id,
-                    submission_id=job.submission_id,
-                    miner_hotkey=job.miner_hotkey,
-                    hf_repo_id=job.hf_repo_id,
-                    env_provider=job.env_provider,
-                    benchmark_name=job.benchmark_name,
-                    config=job.config if job.config else {},
-                    status=EvaluationStatus.QUEUED,
-                    validator_statuses={
-                        hotkey: EvaluationStatus.QUEUED
-                        for hotkey in connected_validator_hotkeys
-                    },
-                )
-                await event_broadcaster.broadcast_event(
-                    EventType.JOB_CREATED, job_event
-                )
-                await self._broadcast_job(job)
-
-            await self._broadcast_stats_update()
+            await self._publish_new_jobs(jobs)
 
             logger.info(
                 "Processed S3 submission %s from miner %s",
@@ -2397,6 +2384,143 @@ class BackendService:
         except Exception as e:
             logger.error(f"Failed to broadcast stats update: {e}")
 
+    async def rerun_submission_evaluations(
+        self,
+        submission_id: int,
+        benchmark_names: Optional[List[str]] = None,
+        requested_by_api_key_id: Optional[int] = None,
+    ) -> List[BackendEvaluationJob]:
+        """Re-run evaluations for a submission across its configured benchmarks."""
+
+        if not self.async_session:
+            raise RuntimeError("Database not initialized")
+
+        benchmark_filter = (
+            {name.strip() for name in benchmark_names if name.strip()}
+            if benchmark_names
+            else None
+        )
+
+        new_jobs: List[BackendEvaluationJob] = []
+
+        async with self.async_session() as session:
+            submission = await session.get(MinerSubmission, submission_id)
+            if not submission:
+                raise SubmissionNotFoundError(f"Submission {submission_id} not found")
+
+            competition = await session.get(Competition, submission.competition_id)
+            if not competition:
+                raise SubmissionNotFoundError(
+                    f"Competition {submission.competition_id} not found for submission {submission_id}"
+                )
+
+            benchmarks = competition.benchmarks or []
+            for benchmark in benchmarks:
+                provider = (
+                    benchmark.get("provider") if isinstance(benchmark, dict) else None
+                )
+                benchmark_name = (
+                    benchmark.get("benchmark_name")
+                    if isinstance(benchmark, dict)
+                    else None
+                )
+
+                if not provider or not benchmark_name:
+                    logger.error(
+                        "Submission %s rerun skipped invalid benchmark entry: %s",
+                        submission_id,
+                        benchmark,
+                    )
+                    continue
+
+                if benchmark_filter and benchmark_name not in benchmark_filter:
+                    continue
+
+                job = BackendEvaluationJob(
+                    id=next(self.id_generator),
+                    submission_id=submission.id,
+                    competition_id=competition.id,
+                    miner_hotkey=submission.miner_hotkey,
+                    hf_repo_id=submission.hf_repo_id,
+                    env_provider=provider,
+                    benchmark_name=benchmark_name,
+                    config=copy.deepcopy(benchmark.get("config", {}))
+                    if isinstance(benchmark, dict)
+                    else {},
+                    artifact_object_key=submission.artifact_object_key,
+                    artifact_sha256=submission.artifact_sha256,
+                    artifact_size_bytes=submission.artifact_size_bytes,
+                )
+                new_jobs.append(job)
+
+            if not new_jobs:
+                raise NoBenchmarksAvailableError(
+                    "No matching benchmarks available for rerun request"
+                )
+
+            session.add_all(new_jobs)
+            await session.commit()
+
+            for job in new_jobs:
+                await session.refresh(job)
+
+        await self._publish_new_jobs(new_jobs)
+
+        logger.info(
+            "Submission %s rerun triggered by API key %s; queued %s jobs",
+            submission_id,
+            requested_by_api_key_id,
+            len(new_jobs),
+        )
+
+        return new_jobs
+
+    async def rerun_job_evaluation(
+        self,
+        job_id: int,
+        requested_by_api_key_id: Optional[int] = None,
+    ) -> BackendEvaluationJob:
+        """Re-run a specific evaluation job by cloning its configuration."""
+
+        if not self.async_session:
+            raise RuntimeError("Database not initialized")
+
+        async with self.async_session() as session:
+            existing_job = await session.get(BackendEvaluationJob, job_id)
+            if not existing_job:
+                raise EvaluationJobNotFoundError(f"Job {job_id} not found")
+
+            new_job = BackendEvaluationJob(
+                id=next(self.id_generator),
+                submission_id=existing_job.submission_id,
+                competition_id=existing_job.competition_id,
+                miner_hotkey=existing_job.miner_hotkey,
+                hf_repo_id=existing_job.hf_repo_id,
+                env_provider=existing_job.env_provider,
+                benchmark_name=existing_job.benchmark_name,
+                config=copy.deepcopy(existing_job.config)
+                if existing_job.config
+                else {},
+                artifact_object_key=existing_job.artifact_object_key,
+                artifact_sha256=existing_job.artifact_sha256,
+                artifact_size_bytes=existing_job.artifact_size_bytes,
+            )
+
+            session.add(new_job)
+            await session.commit()
+            await session.refresh(new_job)
+
+        await self._publish_new_jobs([new_job])
+
+        logger.info(
+            "Job %s rerun created as job %s by API key %s",
+            job_id,
+            new_job.id,
+            requested_by_api_key_id,
+        )
+
+        return new_job
+
     async def _update_job_status(
         self,
         job_id: int,
@@ -2468,6 +2592,51 @@ class BackendService:
         """Update job status for all connected validators."""
         for validator_hotkey in self.validator_connections.values():
             await self._update_job_status(job_id, validator_hotkey, status, detail)
+
+    async def _publish_new_jobs(self, jobs: Sequence[BackendEvaluationJob]) -> None:
+        """Emit events and broadcasts for newly created jobs."""
+
+        if not jobs:
+            return
+
+        connected_validator_hotkeys = tuple(
+            dict.fromkeys(self.validator_connections.values())
+        )
+
+        for job in jobs:
+            job_event = JobCreatedEvent(
+                job_id=str(job.id),
+                competition_id=job.competition_id,
+                submission_id=job.submission_id,
+                miner_hotkey=job.miner_hotkey,
+                hf_repo_id=job.hf_repo_id,
+                env_provider=job.env_provider,
+                benchmark_name=job.benchmark_name,
+                config=job.config if job.config else {},
+                status=EvaluationStatus.QUEUED,
+                validator_statuses={
+                    hotkey: EvaluationStatus.QUEUED
+                    for hotkey in connected_validator_hotkeys
+                },
+            )
+
+            try:
+                await event_broadcaster.broadcast_event(
+                    EventType.JOB_CREATED, job_event
+                )
+            except Exception as exc:  # pragma: no cover - broadcast best effort
+                logger.error(
+                    "Failed to broadcast job created event for job %s: %s",
+                    job.id,
+                    exc,
+                )
+
+            try:
+                await self._broadcast_job(job)
+            except Exception as exc:  # pragma: no cover - broadcast best effort
+                logger.error("Failed to push job %s to validators: %s", job.id, exc)
+
+        await self._broadcast_stats_update()
 
     async def _broadcast_job(self, job: BackendEvaluationJob):
         """Broadcast job to connected validators."""

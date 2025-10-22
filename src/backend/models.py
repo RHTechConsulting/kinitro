@@ -105,6 +105,12 @@ class LeaderCandidateReviewRequest(SQLModel):
     reason: Optional[str] = None
 
 
+class SubmissionRerunRequest(SQLModel):
+    """Request payload for re-running submission evaluations."""
+
+    benchmarks: Optional[List[str]] = None
+
+
 class CompetitionLeaderCandidateResponse(SQLModel):
     """Response model representing a leader candidate entry."""
 

@@ -17,6 +17,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
@@ -27,6 +28,7 @@ from backend.auth import (
     hash_api_key,
 )
 from backend.auth_middleware import AdminAuthMiddleware, ApiAuthMiddleware, admin_route
+from backend.auth_middleware import ADMIN_FLAG_ATTR
 from backend.constants import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -41,8 +43,11 @@ from backend.events import (
 from backend.realtime import event_broadcaster
 from backend.service import (
     BackendService,
+    EvaluationJobNotFoundError,
     LeaderCandidateAlreadyReviewedError,
     LeaderCandidateNotFoundError,
+    NoBenchmarksAvailableError,
+    SubmissionNotFoundError,
 )
 from core import __version__ as VERSION  # noqa: N812
 from core.db.models import EvaluationStatus, SnowflakeId
@@ -88,6 +93,7 @@ from .models import (
     RevealedSubmissionResponse,
     SubmissionLeaderboardEntry,
     SubmissionLeaderboardResponse,
+    SubmissionRerunRequest,
     ValidatorConnection,
     ValidatorInfoResponse,
 )
@@ -173,6 +179,7 @@ def _build_submission_upload_message(payload: SubmissionUploadRequest) -> bytes:
 # Create backend service instance
 config = BackendConfig()
 backend_service = BackendService(config)
+API_SECURITY_SCHEME_NAME = "ApiKeyAuth"
 
 
 @asynccontextmanager
@@ -237,6 +244,54 @@ async def root() -> dict:
         "docs": "/docs",
         "health": "/health",
     }
+
+
+def custom_openapi() -> dict:
+    """Customize OpenAPI schema to advertise API key security."""
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    components = openapi_schema.setdefault("components", {})
+    security_schemes = components.setdefault("securitySchemes", {})
+    security_schemes[API_SECURITY_SCHEME_NAME] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key used for authenticated endpoints.",
+    }
+
+    paths = openapi_schema.get("paths", {})
+
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if not endpoint or not getattr(endpoint, ADMIN_FLAG_ATTR, False):
+            continue
+
+        path_item = paths.get(route.path)
+        if not path_item:
+            continue
+
+        for method in route.methods or []:
+            method_key = method.lower()
+            operation = path_item.get(method_key)
+            if not operation:
+                continue
+            security = operation.setdefault("security", [])
+            if {API_SECURITY_SCHEME_NAME: []} not in security:
+                security.append({API_SECURITY_SCHEME_NAME: []})
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 
 @app.get("/health")
@@ -845,6 +900,19 @@ async def get_validator(validator_hotkey: str):
 async def list_submissions(
     competition_id: Optional[str] = Query(None, description="Filter by competition ID"),
     miner_hotkey: Optional[str] = Query(None, description="Filter by miner hotkey"),
+    sort_by: Literal[
+        "created_at",
+        "submission_time",
+        "commitment_block",
+        "version",
+    ] = Query(
+        "created_at",
+        description="Primary field to sort by",
+    ),
+    sort_direction: Literal["asc", "desc"] = Query(
+        "desc",
+        description="Sort direction for the primary field",
+    ),
     skip: int = Query(0, ge=0),
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
 ):
@@ -855,6 +923,13 @@ async def list_submissions(
             detail="Database not initialized",
         )
     async with backend_service.async_session() as session:
+        sort_column_map = {
+            "created_at": MinerSubmission.created_at,
+            "submission_time": MinerSubmission.submission_time,
+            "commitment_block": MinerSubmission.commitment_block,
+            "version": MinerSubmission.version,
+        }
+
         query = select(MinerSubmission)
 
         if competition_id:
@@ -862,13 +937,162 @@ async def list_submissions(
         if miner_hotkey:
             query = query.where(MinerSubmission.miner_hotkey == miner_hotkey)
 
-        query = query.order_by(MinerSubmission.created_at.desc())
+        primary_column = sort_column_map[sort_by]
+        primary_order = (
+            primary_column.desc() if sort_direction == "desc" else primary_column.asc()
+        )
+
+        query = query.order_by(primary_order, MinerSubmission.id.desc())
         query = query.offset(skip).limit(limit)
 
         result = await session.execute(query)
         submissions = result.scalars().all()
 
         return [MinerSubmissionResponse.model_validate(s) for s in submissions]
+
+
+@app.get("/submissions/revealed", response_model=List[RevealedSubmissionResponse])
+async def list_revealed_submissions(
+    competition_id: Optional[str] = Query(None, description="Filter by competition ID"),
+    miner_hotkey: Optional[str] = Query(None, description="Filter by miner hotkey"),
+    only_active_urls: bool = Query(
+        False,
+        description="When true, return only entries whose public URL has not expired",
+    ),
+    sort_by: Literal[
+        "released_at",
+        "holdout_release_at",
+        "created_at",
+    ] = Query(
+        "released_at",
+        description="Primary field to sort revealed submissions by",
+    ),
+    sort_direction: Literal["asc", "desc"] = Query(
+        "desc",
+        description="Sort direction for the primary field",
+    ),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
+):
+    """List submissions whose hold-out period has ended."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        sort_column_map = {
+            "released_at": MinerSubmission.released_at,
+            "holdout_release_at": MinerSubmission.holdout_release_at,
+            "created_at": MinerSubmission.created_at,
+        }
+
+        query = select(MinerSubmission).where(
+            MinerSubmission.released_at.is_not(None),
+            MinerSubmission.public_artifact_url.is_not(None),
+        )
+
+        if competition_id:
+            query = query.where(MinerSubmission.competition_id == competition_id)
+        if miner_hotkey:
+            query = query.where(MinerSubmission.miner_hotkey == miner_hotkey)
+        if only_active_urls:
+            now = datetime.now(timezone.utc)
+            query = query.where(
+                MinerSubmission.public_artifact_url_expires_at.is_not(None),
+                MinerSubmission.public_artifact_url_expires_at > now,
+            )
+
+        primary_column = sort_column_map[sort_by]
+        primary_order = (
+            primary_column.desc() if sort_direction == "desc" else primary_column.asc()
+        )
+
+        query = query.order_by(primary_order, MinerSubmission.id.desc())
+        query = query.offset(skip).limit(limit)
+
+        result = await session.execute(query)
+        submissions = result.scalars().all()
+
+        return [
+            RevealedSubmissionResponse.model_validate(submission)
+            for submission in submissions
+        ]
+
+
+@app.post(
+    "/submissions/{submission_id}/rerun",
+    response_model=List[JobResponse],
+)
+@admin_route
+async def rerun_submission_evaluations(
+    submission_id: int,
+    request: Request,
+    parameters: Optional[SubmissionRerunRequest] = Body(
+        default=None,
+        description="Optional benchmark filters to restrict rerun scope",
+    ),
+):
+    """Re-run evaluations for a submission (admin only)."""
+
+    params = parameters or SubmissionRerunRequest()
+    admin_user = get_admin_user(request)
+
+    try:
+        jobs = await backend_service.rerun_submission_evaluations(
+            submission_id,
+            benchmark_names=params.benchmarks,
+            requested_by_api_key_id=getattr(admin_user, "id", None),
+        )
+    except SubmissionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except NoBenchmarksAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return [JobResponse.model_validate(job) for job in jobs]
+
+
+@app.get(
+    "/submissions/revealed/{submission_id}",
+    response_model=RevealedSubmissionResponse,
+)
+async def get_revealed_submission(submission_id: int):
+    """Get a specific revealed submission by ID."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(
+            select(MinerSubmission).where(MinerSubmission.id == submission_id)
+        )
+        submission = result.scalar_one_or_none()
+
+        if (
+            not submission
+            or submission.released_at is None
+            or submission.public_artifact_url is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Revealed submission not found",
+            )
+
+        return RevealedSubmissionResponse.model_validate(submission)
 
 
 @app.get("/submissions/{submission_id}", response_model=MinerSubmissionResponse)
@@ -891,54 +1115,6 @@ async def get_submission(submission_id: int):
             )
 
         return MinerSubmissionResponse.model_validate(submission)
-
-
-@app.get("/submissions/revealed", response_model=List[RevealedSubmissionResponse])
-async def list_revealed_submissions(
-    competition_id: Optional[str] = Query(None, description="Filter by competition ID"),
-    miner_hotkey: Optional[str] = Query(None, description="Filter by miner hotkey"),
-    only_active_urls: bool = Query(
-        False,
-        description="When true, return only entries whose public URL has not expired",
-    ),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
-):
-    """List submissions whose hold-out period has ended."""
-    if not backend_service.async_session:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not initialized",
-        )
-
-    async with backend_service.async_session() as session:
-        query = select(MinerSubmission).where(
-            MinerSubmission.released_at.is_not(None),
-            MinerSubmission.public_artifact_url.is_not(None),
-        )
-
-        if competition_id:
-            query = query.where(MinerSubmission.competition_id == competition_id)
-        if miner_hotkey:
-            query = query.where(MinerSubmission.miner_hotkey == miner_hotkey)
-        if only_active_urls:
-            now = datetime.now(timezone.utc)
-            query = query.where(
-                MinerSubmission.public_artifact_url_expires_at.is_not(None),
-                MinerSubmission.public_artifact_url_expires_at > now,
-            )
-
-        query = (
-            query.order_by(MinerSubmission.released_at.desc()).offset(skip).limit(limit)
-        )
-
-        result = await session.execute(query)
-        submissions = result.scalars().all()
-
-        return [
-            RevealedSubmissionResponse.model_validate(submission)
-            for submission in submissions
-        ]
 
 
 # Job endpoints
@@ -970,6 +1146,32 @@ async def list_jobs(
         jobs = result.scalars().all()
 
         return [JobResponse.model_validate(j) for j in jobs]
+
+
+@app.post("/jobs/{job_id}/rerun", response_model=JobResponse)
+@admin_route
+async def rerun_job(job_id: SnowflakeId, request: Request) -> JobResponse:
+    """Re-run a specific evaluation job (admin only)."""
+
+    admin_user = get_admin_user(request)
+
+    try:
+        job = await backend_service.rerun_job_evaluation(
+            int(job_id),
+            requested_by_api_key_id=getattr(admin_user, "id", None),
+        )
+    except EvaluationJobNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return JobResponse.model_validate(job)
 
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
