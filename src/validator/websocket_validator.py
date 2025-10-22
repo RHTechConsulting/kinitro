@@ -493,13 +493,14 @@ class WebSocketValidator(Neuron):
                     self._send_queue.task_done()
 
         except asyncio.CancelledError:
+            logger.error("Outbound sender task cancelled")
             raise
         except Exception:
             if self.websocket:
                 try:
                     await self.websocket.close()
                 except Exception:
-                    pass
+                    logger.error("Error closing WebSocket connection")
         finally:
             if self._send_queue:
                 while not self._send_queue.empty():
@@ -507,6 +508,7 @@ class WebSocketValidator(Neuron):
                         self._send_queue.get_nowait()
                         self._send_queue.task_done()
                     except asyncio.QueueEmpty:
+                        logger.warning("Outbound queue already empty")
                         break
 
     async def _init_chain(self) -> None:
