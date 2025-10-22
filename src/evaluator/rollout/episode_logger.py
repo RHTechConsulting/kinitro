@@ -613,6 +613,9 @@ class EpisodeLogger:
             step_data_copy["submission_id"] = self.submission_id
             step_data_copy["task_id"] = self.task_id
             step_data_copy["episode_id"] = self._current_episode_id
+            step_data_copy["job_id"] = self.job_id
+            step_data_copy["env_name"] = self.env_name
+            step_data_copy["benchmark_name"] = self.benchmark_name
 
             # Remove the original timestamp key since we renamed it
             del step_data_copy["timestamp"]

@@ -41,6 +41,9 @@ dotenv.load_dotenv()
 
 logger = get_logger(__name__)
 
+VALIDATOR_SEND_QUEUE_MAXSIZE = 1000
+VALIDATOR_SEND_QUEUE_WARN_FRACTION = 0.8
+
 
 class WebSocketValidator(Neuron):
     """
@@ -71,6 +74,8 @@ class WebSocketValidator(Neuron):
         self._running = False
         self._heartbeat_task = None
         self._result_processor_task = None
+        self._send_queue: Optional[asyncio.Queue[dict]] = None
+        self._sender_task: Optional[asyncio.Task] = None
 
         # Database and pgqueue
         self.database_url = config.settings.get(
@@ -123,6 +128,23 @@ class WebSocketValidator(Neuron):
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+            self._heartbeat_task = None
+
+        if self._send_queue:
+            try:
+                self._send_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+        if self._sender_task:
+            self._sender_task.cancel()
+            try:
+                await self._sender_task
+            except asyncio.CancelledError:
+                pass
+            self._sender_task = None
+
+        self._send_queue = None
 
         # Cancel result processor
         if self._result_processor_task:
@@ -146,11 +168,16 @@ class WebSocketValidator(Neuron):
 
             async with websockets.connect(
                 self.backend_url,
-                ping_interval=20,
-                ping_timeout=10,
+                # NOTE: Disabled the library keepalive pings so we rely on our
+                # application-level heartbeat rather than closing the
+                # connection when the event loop is busy.
+                ping_interval=None,
+                ping_timeout=None,
                 close_timeout=10,
             ) as websocket:
                 self.websocket = websocket
+                self._send_queue = asyncio.Queue(maxsize=VALIDATOR_SEND_QUEUE_MAXSIZE)
+                self._sender_task = asyncio.create_task(self._sender_loop())
 
                 # Register with backend
                 await self._register()
@@ -171,6 +198,27 @@ class WebSocketValidator(Neuron):
             self.connected = False
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                self._heartbeat_task = None
+
+            if self._send_queue:
+                try:
+                    self._send_queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+
+            if self._sender_task:
+                self._sender_task.cancel()
+                try:
+                    await self._sender_task
+                except asyncio.CancelledError:
+                    pass
+                self._sender_task = None
+
+            self._send_queue = None
 
     async def _register(self):
         """Register validator with backend."""
@@ -418,6 +466,51 @@ class WebSocketValidator(Neuron):
         """Send episode step data to the backend."""
         await self._send_message(step_data.model_dump())
 
+    async def _sender_loop(self) -> None:
+        """Continuously flush the outbound queue to the backend."""
+
+        if not self._send_queue:
+            return
+
+        try:
+            while True:
+                message = await self._send_queue.get()
+
+                if message is None:
+                    self._send_queue.task_done()
+                    break
+
+                try:
+                    if not self.websocket:
+                        raise RuntimeError("WebSocket connection unavailable")
+
+                    message_json = json.dumps(message, default=str)
+                    await self.websocket.send(message_json)
+                except Exception as exc:
+                    logger.error(f"Outbound sender error: {exc}")
+                    raise
+                finally:
+                    self._send_queue.task_done()
+
+        except asyncio.CancelledError:
+            logger.error("Outbound sender task cancelled")
+            raise
+        except Exception:
+            if self.websocket:
+                try:
+                    await self.websocket.close()
+                except Exception:
+                    logger.error("Error closing WebSocket connection")
+        finally:
+            if self._send_queue:
+                while not self._send_queue.empty():
+                    try:
+                        self._send_queue.get_nowait()
+                        self._send_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        logger.warning("Outbound queue already empty")
+                        break
+
     async def _init_chain(self) -> None:
         """Initialize blockchain info."""
         try:
@@ -525,8 +618,23 @@ class WebSocketValidator(Neuron):
             raise Exception("No WebSocket connection")
 
         try:
-            message_json = json.dumps(message, default=str)
-            await self.websocket.send(message_json)
+            if not self._send_queue:
+                raise Exception("Outbound queue not initialized")
+
+            queue_size = self._send_queue.qsize()
+            if queue_size > int(
+                VALIDATOR_SEND_QUEUE_MAXSIZE * VALIDATOR_SEND_QUEUE_WARN_FRACTION
+            ):
+                logger.warning(
+                    "Outbound queue size high (%s/%s)",
+                    queue_size,
+                    VALIDATOR_SEND_QUEUE_MAXSIZE,
+                )
+
+            self._send_queue.put_nowait(message)
+        except asyncio.QueueFull:
+            logger.error("Outbound message queue full; dropping message")
+            raise
         except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+            logger.error(f"Failed to enqueue message: {e}")
             raise

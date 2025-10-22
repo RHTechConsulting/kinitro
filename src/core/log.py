@@ -14,7 +14,24 @@ from colorama import Back, Fore, Style, init
 init(autoreset=True)
 
 
+TRACE_LEVEL_NUM = logging.DEBUG - 5
+
+if not hasattr(logging, "TRACE"):
+    logging.TRACE = TRACE_LEVEL_NUM
+    logging.addLevelName(logging.TRACE, "TRACE")
+
+
+def _trace(self: logging.Logger, message, *args, **kwargs):
+    if self.isEnabledFor(logging.TRACE):
+        self._log(logging.TRACE, message, args, **kwargs)
+
+
+if not hasattr(logging.Logger, "trace"):
+    logging.Logger.trace = _trace  # type: ignore[attr-defined]
+
+
 class LogLevel(StrEnum):
+    TRACE = "TRACE"
     DEBUG = "DEBUG"
     INFO = "INFO"
     WARNING = "WARNING"
@@ -31,6 +48,7 @@ class LogLevel(StrEnum):
             The logging module constant for the log level.
         """
         return {
+            LogLevel.TRACE: logging.TRACE,
             LogLevel.DEBUG: logging.DEBUG,
             LogLevel.INFO: logging.INFO,
             LogLevel.WARNING: logging.WARNING,
@@ -43,6 +61,7 @@ class ColoredFormatter(logging.Formatter):
     """Custom logging formatter to add colors based on log level."""
 
     LEVEL_COLORS = {
+        LogLevel.TRACE: Fore.MAGENTA,
         LogLevel.DEBUG: Fore.CYAN,
         LogLevel.INFO: Fore.GREEN,
         LogLevel.WARNING: Fore.YELLOW,

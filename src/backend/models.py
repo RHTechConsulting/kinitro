@@ -737,6 +737,13 @@ class EpisodeData(TimestampMixin, SQLModel, table=True):
         Index("ix_episode_data_success", "success"),
         Index("ix_episode_data_submission_task", "submission_id", "task_id"),
         Index("ix_episode_data_validator", "validator_hotkey"),
+        UniqueConstraint(
+            "submission_id",
+            "task_id",
+            "episode_id",
+            "validator_hotkey",
+            name="uq_episode_data_submission_task_episode_validator",
+        ),
     )
 
 
