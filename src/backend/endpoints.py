@@ -4,7 +4,7 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 from fastapi import (
     Body,
@@ -34,8 +34,6 @@ from backend.constants import (
     SUBMISSION_SIGNATURE_MAX_AGE_SECONDS,
 )
 from backend.events import (
-    EpisodeCompletedEvent,
-    EpisodeStepEvent,
     EvaluationCompletedEvent,
     ValidatorConnectedEvent,
     ValidatorDisconnectedEvent,
@@ -61,6 +59,7 @@ from core.schemas import ModelProvider
 
 from .config import BackendConfig
 from .models import (
+    AgentLeaderboardEntry,
     ApiKey,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
@@ -72,8 +71,10 @@ from .models import (
     BackendStatsResponse,
     Competition,
     CompetitionCreateRequest,
+    CompetitionLeaderboardResponse,
     CompetitionLeaderCandidate,
     CompetitionLeaderCandidateResponse,
+    CompetitionLeaderInfo,
     CompetitionResponse,
     EpisodeData,
     EpisodeStepData,
@@ -84,6 +85,9 @@ from .models import (
     LeaderCandidateStatus,
     MinerSubmission,
     MinerSubmissionResponse,
+    RevealedSubmissionResponse,
+    SubmissionLeaderboardEntry,
+    SubmissionLeaderboardResponse,
     ValidatorConnection,
     ValidatorInfoResponse,
 )
@@ -430,6 +434,261 @@ async def list_competitions(
         return [CompetitionResponse.model_validate(c) for c in competitions]
 
 
+@app.get(
+    "/competitions/leaderboard",
+    response_model=CompetitionLeaderboardResponse,
+)
+async def get_competition_leaderboard(
+    active_only: bool = Query(
+        True, description="Filter for active competitions only when true"
+    ),
+):
+    """Aggregate current competition leaders into an agent leaderboard."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        query = select(Competition)
+        if active_only:
+            query = query.where(Competition.active)
+
+        result = await session.execute(query)
+        competitions = result.scalars().all()
+
+    total_points = sum(comp.points for comp in competitions)
+    competition_infos = [
+        CompetitionLeaderInfo(
+            competition_id=comp.id,
+            competition_name=comp.name,
+            points=comp.points,
+            current_leader_hotkey=comp.current_leader_hotkey,
+            current_leader_reward=comp.current_leader_reward,
+            leader_updated_at=comp.leader_updated_at,
+        )
+        for comp in competitions
+    ]
+
+    per_miner_points: dict[str, int] = {}
+    per_miner_competitions: dict[str, List[str]] = {}
+
+    for comp in competitions:
+        leader_hotkey = comp.current_leader_hotkey
+        if not leader_hotkey:
+            continue
+
+        per_miner_points[leader_hotkey] = (
+            per_miner_points.get(leader_hotkey, 0) + comp.points
+        )
+        per_miner_competitions.setdefault(leader_hotkey, []).append(comp.id)
+
+    sorted_leaders = sorted(
+        per_miner_points.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
+    leaderboard_entries: List[AgentLeaderboardEntry] = []
+    for index, (hotkey, points) in enumerate(sorted_leaders, start=1):
+        normalized_score = (points / total_points) if total_points else 0.0
+        leaderboard_entries.append(
+            AgentLeaderboardEntry(
+                rank=index,
+                miner_hotkey=hotkey,
+                total_points=points,
+                normalized_score=normalized_score,
+                competitions=sorted(per_miner_competitions.get(hotkey, [])),
+            )
+        )
+
+    return CompetitionLeaderboardResponse(
+        total_competitions=len(competitions),
+        total_points=total_points,
+        leaders=leaderboard_entries,
+        competitions=competition_infos,
+    )
+
+
+@app.get(
+    "/leaderboards/submissions",
+    response_model=SubmissionLeaderboardResponse,
+)
+async def get_submission_leaderboard(
+    competition_id: Optional[str] = Query(
+        None, description="Filter evaluation results by competition ID"
+    ),
+    miner_hotkey: Optional[str] = Query(
+        None, description="Filter evaluation results by miner hotkey"
+    ),
+    env_provider: Optional[str] = Query(
+        None, description="Filter evaluation results by provider"
+    ),
+    benchmark: Optional[str] = Query(
+        None, description="Filter evaluation results by benchmark name"
+    ),
+    validator_hotkey: Optional[str] = Query(
+        None, description="Filter evaluation results by validator hotkey"
+    ),
+    sort_by: Literal["avg_reward", "success_rate", "score"] = Query(
+        "avg_reward",
+        description="Primary metric to sort by",
+    ),
+    sort_direction: Literal["asc", "desc"] = Query(
+        "desc",
+        description="Sort direction for the primary metric",
+    ),
+    min_results: int = Query(
+        1, ge=1, description="Minimum number of evaluation results per submission"
+    ),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+):
+    """Rank submissions by aggregated evaluation metrics."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    metric_column_map = {
+        "avg_reward": BackendEvaluationResult.avg_reward,
+        "success_rate": BackendEvaluationResult.success_rate,
+        "score": BackendEvaluationResult.score,
+    }
+
+    async with backend_service.async_session() as session:
+        filters = [
+            metric_column_map[sort_by].is_not(None),
+        ]
+
+        if competition_id:
+            filters.append(BackendEvaluationResult.competition_id == competition_id)
+        if miner_hotkey:
+            filters.append(BackendEvaluationResult.miner_hotkey == miner_hotkey)
+        if env_provider:
+            filters.append(BackendEvaluationJob.env_provider == env_provider)
+        if benchmark:
+            filters.append(BackendEvaluationJob.benchmark_name == benchmark)
+        if validator_hotkey:
+            filters.append(BackendEvaluationResult.validator_hotkey == validator_hotkey)
+
+        base_stmt = (
+            select(
+                BackendEvaluationJob.submission_id.label("submission_id"),
+                BackendEvaluationJob.competition_id.label("competition_id"),
+                BackendEvaluationResult.miner_hotkey.label("miner_hotkey"),
+                MinerSubmission.version.label("version"),
+                MinerSubmission.hf_repo_id.label("hf_repo_id"),
+                func.avg(BackendEvaluationResult.avg_reward).label("avg_reward"),
+                func.avg(BackendEvaluationResult.success_rate).label("success_rate"),
+                func.avg(BackendEvaluationResult.score).label("score"),
+                func.count(BackendEvaluationResult.id).label("result_count"),
+                func.coalesce(
+                    func.sum(BackendEvaluationResult.total_episodes), 0
+                ).label("total_episodes"),
+                func.max(BackendEvaluationResult.result_time).label("last_result_time"),
+            )
+            .join(
+                BackendEvaluationJob,
+                BackendEvaluationResult.job_id == BackendEvaluationJob.id,
+            )
+            .join(
+                MinerSubmission,
+                MinerSubmission.id == BackendEvaluationJob.submission_id,
+            )
+            .group_by(
+                BackendEvaluationJob.submission_id,
+                BackendEvaluationJob.competition_id,
+                BackendEvaluationResult.miner_hotkey,
+                MinerSubmission.version,
+                MinerSubmission.hf_repo_id,
+            )
+        )
+
+        if filters:
+            base_stmt = base_stmt.where(*filters)
+
+        if min_results > 1:
+            base_stmt = base_stmt.having(
+                func.count(BackendEvaluationResult.id) >= min_results
+            )
+
+        aggregation_subquery = base_stmt.subquery()
+
+        sort_column_map = {
+            "avg_reward": aggregation_subquery.c.avg_reward,
+            "success_rate": aggregation_subquery.c.success_rate,
+            "score": aggregation_subquery.c.score,
+        }
+        sort_column = sort_column_map[sort_by]
+        primary_order = (
+            sort_column.desc() if sort_direction == "desc" else sort_column.asc()
+        )
+
+        if sort_by == "avg_reward":
+            secondary_column = aggregation_subquery.c.success_rate
+        elif sort_by == "success_rate":
+            secondary_column = aggregation_subquery.c.avg_reward
+        else:
+            secondary_column = aggregation_subquery.c.avg_reward
+
+        secondary_order = secondary_column.desc()
+
+        ranked_stmt = (
+            select(*aggregation_subquery.c)
+            .order_by(
+                primary_order,
+                secondary_order,
+                aggregation_subquery.c.submission_id,
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+
+        results = await session.execute(ranked_stmt)
+        rows = results.all()
+
+        count_stmt = select(func.count()).select_from(aggregation_subquery)
+        total_submissions = (await session.execute(count_stmt)).scalar() or 0
+
+    entries: List[SubmissionLeaderboardEntry] = []
+    for index, row in enumerate(rows, start=offset + 1):
+        avg_reward_val = float(row.avg_reward) if row.avg_reward is not None else None
+        success_rate_val = (
+            float(row.success_rate) if row.success_rate is not None else None
+        )
+        score_val = float(row.score) if row.score is not None else None
+        total_episodes_val = (
+            int(row.total_episodes) if row.total_episodes is not None else None
+        )
+        entries.append(
+            SubmissionLeaderboardEntry(
+                rank=index,
+                submission_id=str(row.submission_id),
+                competition_id=row.competition_id,
+                miner_hotkey=row.miner_hotkey,
+                hf_repo_id=row.hf_repo_id,
+                version=row.version,
+                avg_reward=avg_reward_val,
+                success_rate=success_rate_val,
+                score=score_val,
+                total_results=int(row.result_count),
+                total_episodes=total_episodes_val,
+                last_result_time=row.last_result_time,
+            )
+        )
+
+    return SubmissionLeaderboardResponse(
+        total_submissions=total_submissions,
+        offset=offset,
+        limit=limit,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        entries=entries,
+    )
+
+
 @app.get("/competitions/{competition_id}", response_model=CompetitionResponse)
 async def get_competition(competition_id: str):
     """Get a specific competition by ID."""
@@ -632,6 +891,54 @@ async def get_submission(submission_id: int):
             )
 
         return MinerSubmissionResponse.model_validate(submission)
+
+
+@app.get("/submissions/revealed", response_model=List[RevealedSubmissionResponse])
+async def list_revealed_submissions(
+    competition_id: Optional[str] = Query(None, description="Filter by competition ID"),
+    miner_hotkey: Optional[str] = Query(None, description="Filter by miner hotkey"),
+    only_active_urls: bool = Query(
+        False,
+        description="When true, return only entries whose public URL has not expired",
+    ),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=MIN_PAGE_LIMIT, le=MAX_PAGE_LIMIT),
+):
+    """List submissions whose hold-out period has ended."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        query = select(MinerSubmission).where(
+            MinerSubmission.released_at.is_not(None),
+            MinerSubmission.public_artifact_url.is_not(None),
+        )
+
+        if competition_id:
+            query = query.where(MinerSubmission.competition_id == competition_id)
+        if miner_hotkey:
+            query = query.where(MinerSubmission.miner_hotkey == miner_hotkey)
+        if only_active_urls:
+            now = datetime.now(timezone.utc)
+            query = query.where(
+                MinerSubmission.public_artifact_url_expires_at.is_not(None),
+                MinerSubmission.public_artifact_url_expires_at > now,
+            )
+
+        query = (
+            query.order_by(MinerSubmission.released_at.desc()).offset(skip).limit(limit)
+        )
+
+        result = await session.execute(query)
+        submissions = result.scalars().all()
+
+        return [
+            RevealedSubmissionResponse.model_validate(submission)
+            for submission in submissions
+        ]
 
 
 # Job endpoints

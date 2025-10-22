@@ -180,6 +180,20 @@ class MinerSubmissionResponse(SQLModel):
         return str(value)
 
 
+class RevealedSubmissionResponse(MinerSubmissionResponse):
+    """Response model for submissions whose hold-out period has ended."""
+
+    holdout_release_at: Optional[datetime]
+    released_at: Optional[datetime]
+    public_artifact_url: Optional[str]
+    public_artifact_url_expires_at: Optional[datetime]
+    artifact_sha256: Optional[str]
+    artifact_size_bytes: Optional[int]
+
+    class Config:
+        from_attributes = True
+
+
 class JobResponse(SQLModel):
     """Response model for job data."""
 
@@ -259,6 +273,64 @@ class BackendStatsResponse(SQLModel):
     total_results: int
     last_seen_block: int
     competition_percentages: Dict[str, float]
+
+
+class CompetitionLeaderInfo(SQLModel):
+    """Summary of an individual competition's active leader."""
+
+    competition_id: str
+    competition_name: str
+    points: int
+    current_leader_hotkey: Optional[str]
+    current_leader_reward: Optional[float]
+    leader_updated_at: Optional[datetime]
+
+
+class AgentLeaderboardEntry(SQLModel):
+    """Aggregated leaderboard entry for a miner across competitions."""
+
+    rank: int
+    miner_hotkey: str
+    total_points: int
+    normalized_score: float
+    competitions: List[str]
+
+
+class CompetitionLeaderboardResponse(SQLModel):
+    """Response model for the competition-wide agent leaderboard."""
+
+    total_competitions: int
+    total_points: int
+    leaders: List[AgentLeaderboardEntry]
+    competitions: List[CompetitionLeaderInfo]
+
+
+class SubmissionLeaderboardEntry(SQLModel):
+    """Aggregated submission performance across evaluation results."""
+
+    rank: int
+    submission_id: str
+    competition_id: str
+    miner_hotkey: str
+    hf_repo_id: Optional[str]
+    version: Optional[str]
+    avg_reward: Optional[float]
+    success_rate: Optional[float]
+    score: Optional[float]
+    total_results: int
+    total_episodes: Optional[int]
+    last_result_time: Optional[datetime]
+
+
+class SubmissionLeaderboardResponse(SQLModel):
+    """Response model for submission-focused leaderboards."""
+
+    total_submissions: int
+    offset: int
+    limit: int
+    sort_by: str
+    sort_direction: str
+    entries: List[SubmissionLeaderboardEntry]
 
 
 class ApiKeyCreateRequest(SQLModel):
