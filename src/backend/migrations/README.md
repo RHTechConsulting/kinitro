@@ -6,11 +6,13 @@ This directory contains Alembic migrations for the Kinitro Backend database.
 
 1. **Configure Database URL**:
    Set the environment variable `DATABASE_URL` or update the URL in `alembic.ini`:
+
    ```bash
    export DATABASE_URL="postgresql://user:password@localhost/kinitrodb"
    ```
 
 2. **Install Dependencies**:
+
    ```bash
    uv sync
    uv sync --dev
@@ -19,6 +21,7 @@ This directory contains Alembic migrations for the Kinitro Backend database.
 ## Running Migrations
 
 ### Apply Migrations
+
 ```bash
 # From the backend directory
 cd src/backend
@@ -26,6 +29,7 @@ alembic upgrade head
 ```
 
 ### Generate New Migration
+
 ```bash
 # Auto-generate migration from model changes
 alembic revision --autogenerate -m "description of changes"
@@ -35,6 +39,7 @@ alembic revision -m "description of changes"
 ```
 
 ### Migration History
+
 ```bash
 # Show current revision
 alembic current
@@ -47,6 +52,7 @@ alembic show head
 ```
 
 ### Downgrade
+
 ```bash
 # Downgrade to previous migration
 alembic downgrade -1

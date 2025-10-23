@@ -3,6 +3,7 @@
 The evaluator executes benchmarks for each miner submission. It is responsible for spawning rollout workers, connecting them to containers which run agents, and collecting metrics that flow back to the backend through the validator.
 
 ## Runtime Components
+
 - **Rollout cluster** – `RolloutCluster` manages Ray actors and creates workers that can process multiple benchmark specs.
 - **Benchmark specs** – Each evaluation job declares an environment provider, benchmark name, and config that turn into `BenchmarkSpec` objects.
 - **Rollout worker** – Performs the actual environment interaction, calls the miner agent over RPC, tracks rewards, and records key statistics.
@@ -10,6 +11,7 @@ The evaluator executes benchmarks for each miner submission. It is responsible f
 - **Episode logger** – Streams step data, episode summaries, and uploaded artifacts to pgqueuer while handling retries and back-pressure.
 
 ## Episode Execution Flow
+
 1. The orchestrator builds a `BenchmarkSpec` from the evaluation job and creates a rollout worker.
 2. When the worker requests an action, it forwards the observation to the submission container via the RPC bridge.
 3. The container invokes the miner-provided policy, returns actions, and the worker steps the environment.
@@ -18,10 +20,12 @@ The evaluator executes benchmarks for each miner submission. It is responsible f
 6. Once all benchmarks finish, the worker assembles aggregate metrics (success rate, average reward, total episodes) that feed into the orchestrator’s result payload.
 
 ## Storage and Artifacts
+
 - **S3 Storage** – Image observations and other heavy artifacts upload through the logger’s executor so the backend can serve signed URLs later.
 - **Validator database** – Results and telemetry are queued to the validator Postgres instance so that validator and backend connectivity issues do not drop data.
 
 ## Configuration Highlights
+
 - `episode_log_interval` and `step_log_interval` control how frequently detailed telemetry is enqueued (`config/evaluator.toml.example`).
 - `max_concurrent_jobs` guards resource usage when multiple evaluations are queued concurrently.
 - `s3_config` includes bucket credentials used for artifact uploads.

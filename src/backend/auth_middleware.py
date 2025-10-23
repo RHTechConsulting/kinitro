@@ -9,7 +9,6 @@ from starlette.routing import Match, Route
 
 from backend.auth import UserRole, get_api_key_from_db
 
-
 ADMIN_FLAG_ATTR = "__requires_admin__"
 
 

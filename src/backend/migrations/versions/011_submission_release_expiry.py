@@ -7,9 +7,8 @@ Create Date: 2025-10-16 06:20:00
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "011_submission_release_expiry"
 down_revision = "010_competition_holdout_seconds"

@@ -7,11 +7,8 @@ Create Date: 2025-10-16 04:00:00
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
-
-from sqlmodel.sql.sqltypes import AutoString
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "009_direct_vault_submission"

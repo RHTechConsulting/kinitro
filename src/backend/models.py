@@ -10,9 +10,9 @@ from pydantic import field_validator
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Integer,
     ForeignKey,
     Index,
+    Integer,
     UniqueConstraint,
 )
 from sqlalchemy import (
