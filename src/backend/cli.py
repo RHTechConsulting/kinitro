@@ -285,7 +285,7 @@ def create(ctx, name, role, description, hotkey, expires, force_admin):
 @click.option("--active-only", is_flag=True, help="Show only active keys")
 @click.option("--show-id", is_flag=True, help="Show full ID numbers")
 @click.pass_context
-def list(ctx, role, active_only, show_id):
+def list_keys(ctx, role, active_only, show_id):
     """List all API keys."""
     manager = ctx.obj
 
@@ -357,7 +357,7 @@ def show(ctx, key_id):
             await manager.cleanup()
             return
 
-        console.print(f"\n[bold]API Key Details[/bold]\n")
+        console.print("\n[bold]API Key Details[/bold]\n")
         console.print(f"  [bold]ID:[/bold]              {api_key.id}")
         console.print(f"  [bold]Name:[/bold]            {api_key.name}")
         console.print(f"  [bold]Role:[/bold]            {api_key.role}")

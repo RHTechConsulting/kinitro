@@ -7,11 +7,10 @@ Create Date: 2025-10-16 06:10:00
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from backend.constants import DEFAULT_SUBMISSION_HOLDOUT_SECONDS
-
 
 revision = "010_competition_holdout_seconds"
 down_revision = "009_direct_vault_submission"

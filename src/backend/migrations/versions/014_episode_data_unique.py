@@ -7,7 +7,6 @@ Create Date: 2024-07-01 00:00:00.000000
 
 from alembic import op
 
-
 # revision identifiers, used by Alembic.
 revision = "014_episode_data_unique"
 down_revision = "013_comp_leader_candidates"

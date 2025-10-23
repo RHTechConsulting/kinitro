@@ -7,9 +7,8 @@ Create Date: 2025-10-16 05:30:00
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "002_artifact_cols"
 down_revision = "001"

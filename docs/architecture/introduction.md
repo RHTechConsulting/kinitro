@@ -110,7 +110,7 @@ sequenceDiagram
 
 ## Component Responsibilities
 
-**Backend Service**
+### Backend Service
 
 - **FastAPI REST / Admin**: Hosts competition CRUD, submission uploads, stats, validator management, and WebSocket endpoints.
 - **Chain Monitor & Scheduler**: Tracks Bittensor commitments, ties them to uploaded artifacts, creates `BackendEvaluationJob` records, and watches for stale work.
@@ -119,24 +119,24 @@ sequenceDiagram
 - **Scoring & Weight Engine**: Periodically recalculates miner scores and pushes weight updates back to validators for on-chain emission.
 - **Backend PostgreSQL**: Source of truth for competitions, submissions, jobs, job status, results, stats, and validator connections.
 
-**Validator Node**
+### Validator Node
 
 - **WebSocket Client**: Authenticates with the backend, receives `EvalJobMessage` payloads, and streams results back.
 - **pgqueuer Runner**: Persists jobs/results/episode logs in PostgreSQL so work survives restarts and can be retried.
 - **Validator PostgreSQL**: Stores pgq queues plus normalized tables for jobs, results, and metrics consumed by the evaluator.
 
-**Evaluator Cluster**
+### Evaluator Cluster
 
 - **Evaluator Orchestrator**: Listens to the pgqueuer queue, enforces concurrency caps, and coordinates job lifecycles.
 - **Submission Pods**: Kubernetes pods created per submission to run miner containers in isolation.
 - **Ray Rollout Workers**: Execute benchmark episodes, communicate with submission pods via RPC, and track success metrics.
 - **Episode Logger**: Captures per-episode and per-step data, uploads media to S3-compatible storage, and enqueues telemetry for validator forwarding.
 
-**Miner Tooling**
+### Miner Tooling
 
 - **Miner CLI**: Packages submissions, requests vault upload slots, pushes artifacts directly to the backend-controlled storage, and notarizes submissions on-chain.
 
-**Real-time Clients**
+### Real-time Clients
 
 - Subscribe to the backend’s public WebSocket endpoint to monitor competitions, validator connectivity, and evaluation progress live.
 

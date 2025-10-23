@@ -7,9 +7,8 @@ Create Date: 2024-11-22 00:00:00
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "016_comp_submission_limits"
 down_revision = "015_episode_unique_per_validator"

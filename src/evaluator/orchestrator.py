@@ -309,7 +309,7 @@ class Orchestrator:
             q = Queries(driver)
             await q.enqueue(["add_job"], [eval_job_msg.to_bytes()], [0])
             logger.info("Requeued job %s onto add_job queue", eval_job_msg.job_id)
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "Failed to enqueue job %s for restart", eval_job_msg.job_id
             )

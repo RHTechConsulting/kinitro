@@ -12,10 +12,10 @@ import asyncio
 import copy
 import hashlib
 import os
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from collections import defaultdict
 
 import dotenv
 from asyncpg.exceptions import DeadlockDetectedError
