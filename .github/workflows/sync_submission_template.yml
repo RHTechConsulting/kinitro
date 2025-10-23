@@ -1,15 +1,14 @@
 name: Sync submission template files to the kinitro-agent-template repo
 
-
 on:
   push:
     branches:
       - main
     paths:
-      - 'submission_template/**'
-      - 'src/evaluator/agent_interface.py'
-      - 'src/evaluator/rpc/server.py'
-      - 'src/evaluator/rpc/agent.capnp'
+      - "submission_template/**"
+      - "src/evaluator/agent_interface.py"
+      - "src/evaluator/rpc/server.py"
+      - "src/evaluator/rpc/agent.capnp"
   workflow_dispatch:
 
 env:
@@ -34,16 +33,14 @@ jobs:
           path: ${{ env.TMPL_DIR }}
           fetch-depth: 1
 
-      # GitHub Actions is stupid so it does not support symlinks.
-      # Therefore, we need to copy the symlinked files manually.
       - name: Copy files
         shell: bash
         run: |
           cp -f submission_template/main.py "${{ env.TMPL_DIR }}/main.py"
-          cp -f src/evaluator/agent_interface.py "${{ env.TMPL_DIR }}/agent_interface.py"
-          cp -f src/evaluator/rpc/server.py "${{ env.TMPL_DIR }}/agent_server.py"
-          cp -f src/evaluator/rpc/agent.capnp "${{ env.TMPL_DIR }}/agent.capnp"
-      
+          cp -f submission_template/agent_interface.py "${{ env.TMPL_DIR }}/agent_interface.py"
+          cp -f submission_template/server.py "${{ env.TMPL_DIR }}/agent_server.py"
+          cp -f submission_template/agent.capnp "${{ env.TMPL_DIR }}/agent.capnp"
+
       - name: Commit and push changes
         shell: bash
         run: |
