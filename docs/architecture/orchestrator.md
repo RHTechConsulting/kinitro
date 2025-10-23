@@ -3,6 +3,7 @@
 The orchestrator is the control plane that turns queued evaluation jobs into running rollouts. It listens to pgqueuer events, provisions isolated containers which run agents, wires up Ray workers, and makes sure results flow back to the backend through the validator.
 
 ## Responsibilities
+
 - **Queue consumption** – `PgQueuer` watches the validator database and invokes the orchestrator whenever a new `add_job` event appears.
 - **Concurrency control** – Track active jobs and defer new work until there is capacity.
 - **Environment provisioning** – Spin up Kubernetes pods that host the miner submission and expose an RPC endpoint for workers.
@@ -11,6 +12,7 @@ The orchestrator is the control plane that turns queued evaluation jobs into run
 - **Cleanup & recovery** – Tear down pods, close queues, and reclaim Ray resources even on failure.
 
 ## Job Lifecycle
+
 1. The validator enqueues a job from the backend.
 2. `PgQueuer` triggers the orchestrator’s `process` handler with the job payload.
 3. The job is recorded in the validator database with `EvaluationStatus.STARTING`, guaranteeing visibility and retries.
@@ -21,6 +23,7 @@ The orchestrator is the control plane that turns queued evaluation jobs into run
 8. Cleanup routines ensure pods are removed, Ray actors stopped, and lingering queues closed.
 
 ## Resilience Features
+
 - **Durable queues** – All commands and results flow through pgq tables, so reconnecting services pick up exactly where they left off.
 - **Timeout handling** – The orchestrator checks elapsed time per job and can mark stale work for cleanup.
 - **Health monitoring** – Background tasks watch running jobs for completion or timeout signals and remove them when necessary.
