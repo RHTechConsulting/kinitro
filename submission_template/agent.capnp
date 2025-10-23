@@ -1,1 +1,1 @@
-src/evaluator/rpc/agent.capnp
+../src/evaluator/rpc/agent.capnp
