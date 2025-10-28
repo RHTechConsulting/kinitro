@@ -55,3 +55,41 @@ python -m miner commit --config miner.toml --submission-id <SUBMISSION_ID>
 ```
 
 Only the submission id is required on-chain; the validator uses its own stored metadata (hash and size) during evaluation.
+
+## Local evaluation sandbox
+
+Dry run your agent before uploading by spinning up the lightweight evaluator stack locally:
+
+1. Update `miner.toml` with a `[local_eval]` block (defaults provided in `config/miner.toml.example`).
+2. Start your agent server manually or set `agent_start_cmd` so the CLI launches it for you.
+3. Run with a benchmark spec file:
+
+```bash
+uv run python -m miner local-eval --config miner.toml \
+  --benchmark-spec-file config/benchmarks/local_mt10.json
+```
+
+The CLI connects to your agent, launches a single rollout worker on Ray, and streams benchmark metrics. When the run finishes it writes a JSON summary under `.kinitro/miner_runs/`.
+
+`config/benchmarks/local_mt10.json` is an example spec file which runs MT10 tasks locally. You can read the current list of competitions and their respective benchmark specs [here](https://api.kinitro.ai/docs#/default/list_competitions_competitions_get) if you would like to evaluate your agent on these tasks before submitting it to our backend.
+
+```mermaid
+flowchart LR
+  CLI["miner CLI<br/>local-eval cmd"]
+  AGENT["Agent Server<br/>(your submission)"]
+  WORKER["Rollout worker<br/>(Ray actor)"]
+  RPCT["RPC process<br/>thread"]
+
+  CLI -- "spawn (optional)" --> AGENT
+  CLI -. "create Ray queues" .-> WORKER
+  CLI -. "start RPC thread" .-> RPCT
+  WORKER <-- "RPCRequest/RPCResponse via Ray queues" --> RPCT
+  RPCT <-- "capnp ping/act" --> AGENT
+```
+
+### Tips and troubleshooting
+
+- `agent_start_cmd` can be any shell snippet (`uv run python submission_template/main.py --port 8000`).
+- In your spec file, tune `episodes_per_task`, `max_episode_steps`, and `tasks_per_env` to keep runs lightweight.
+- Logs and summaries live in `.kinitro/miner_runs/`; delete the directory to reset.
+- If you see timeouts, confirm the agent RPC server is reachable on `agent_host:agent_port`.
