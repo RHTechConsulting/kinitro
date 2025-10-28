@@ -38,7 +38,7 @@ jobs:
         run: |
           cp -f submission_template/main.py "${{ env.TMPL_DIR }}/main.py"
           cp -f submission_template/agent_interface.py "${{ env.TMPL_DIR }}/agent_interface.py"
-          cp -f submission_template/server.py "${{ env.TMPL_DIR }}/agent_server.py"
+          cp -f submission_template/agent_server.py "${{ env.TMPL_DIR }}/agent_server.py"
           cp -f submission_template/agent.capnp "${{ env.TMPL_DIR }}/agent.capnp"
 
       - name: Commit and push changes
