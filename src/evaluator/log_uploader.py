@@ -42,10 +42,10 @@ class EvaluationLogUploader:
         self, submission_id: int | str, job_id: int | str, suffix: Optional[str] = None
     ) -> str:
         """Create a deterministic object key for a job's log bundle."""
-        safe_submission = str(submission_id).strip("/").replace("..", "")
-        safe_job = str(job_id).strip("/").replace("..", "")
+        sub_id_str = str(submission_id)
+        job_id_str = str(job_id)
         suffix_part = f"-{suffix}" if suffix else ""
-        return f"{self.prefix}/{safe_submission}/{safe_job}{suffix_part}.json"
+        return f"{self.prefix}/{sub_id_str}/{job_id_str}{suffix_part}.json"
 
     def upload_log_bundle(
         self,

@@ -10,6 +10,7 @@ Handles promise vs coroutine returns, timeouts, and traversal limit.
 import asyncio
 import logging
 import os
+from datetime import timedelta
 from typing import Any
 
 import capnp
@@ -35,10 +36,10 @@ class AgentClient:
 
     async def connect(
         self,
-        timeout: float = 30.0,
+        timeout: timedelta = timedelta(seconds=30),
         *,
         max_attempts: int = 5,
-        base_retry_delay: float = 1.0,
+        base_retry_delay: timedelta = timedelta(seconds=1),
     ):
         """Connect asynchronously using AsyncIoStream and create a TwoPartyClient with a raised traversal limit."""
         print(f"Connecting to {self.address}:{self.port}")
@@ -53,7 +54,7 @@ class AgentClient:
                     capnp.AsyncIoStream.create_connection(
                         host=self.address, port=self.port
                     ),
-                    timeout=timeout,
+                    timeout=timeout.total_seconds(),
                 )
 
                 # Create TwoPartyClient with increased traversal limit (workaround for large messages)
@@ -75,6 +76,7 @@ class AgentClient:
                     raise
 
                 retry_delay = base_retry_delay * attempt
+                retry_seconds = retry_delay.total_seconds()
                 logger.warning(
                     "Attempt %d/%d to connect to agent at %s:%s failed: %s; retrying in %.1fs",
                     attempt,
@@ -82,20 +84,20 @@ class AgentClient:
                     self.address,
                     self.port,
                     exc,
-                    retry_delay,
+                    retry_seconds,
                 )
-                await asyncio.sleep(retry_delay)
+                await asyncio.sleep(retry_seconds)
 
         if last_exc:
             raise last_exc
 
-    async def _await_capnp_result(self, maybe_promise, timeout: float):
+    async def _await_capnp_result(self, maybe_promise, timeout: timedelta):
         """Handle either promise-like (has a_wait) or coroutine-like awaitable from pycapnp."""
         if hasattr(maybe_promise, "a_wait"):
             coro = maybe_promise.a_wait()
         else:
             coro = maybe_promise
-        return await asyncio.wait_for(coro, timeout=timeout)
+        return await asyncio.wait_for(coro, timeout=timeout.total_seconds())
 
     def _to_numpy(self, value):
         """Convert supported tensor-like values to contiguous numpy arrays."""
@@ -135,7 +137,9 @@ class AgentClient:
 
         return observation_msg
 
-    async def act(self, obs: Any, timeout: float = 5.0) -> torch.Tensor:
+    async def act(
+        self, obs: Any, timeout: timedelta = timedelta(seconds=5)
+    ) -> torch.Tensor:
         """
         Send observation (array or dict of arrays) to agent and receive action as torch.Tensor.
         Uses Observation and Tensor structs to avoid pickle.
@@ -180,7 +184,7 @@ class AgentClient:
             )
             return torch.from_numpy(action_np)
         except asyncio.TimeoutError:
-            logger.error("Agent call timed out after %.1fs", timeout)
+            logger.error("Agent call timed out after %.1fs", timeout.total_seconds())
             raise
         except Exception:
             logger.exception("Error in AgentClient.act")
@@ -192,12 +196,14 @@ class AgentClient:
             await self.connect()
         try:
             maybe_promise = self.agent.reset()
-            await self._await_capnp_result(maybe_promise, timeout=5.0)
+            await self._await_capnp_result(maybe_promise, timeout=timedelta(seconds=5))
         except Exception:
             logger.exception("Error in reset")
             raise
 
-    async def ping(self, message: str, timeout: float = 5.0) -> str:
+    async def ping(
+        self, message: str, timeout: timedelta = timedelta(seconds=5)
+    ) -> str:
         if self.agent is None:
             await self.connect()
         try:

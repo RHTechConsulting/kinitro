@@ -1546,47 +1546,52 @@ async def _resolve_log_response(
     pod_logs = extra_data.get("pod_logs")
     log_artifact = extra_data.get("log_artifact")
 
-    artifact_metadata: Optional[Dict[str, Any]] = None
-    download_info: Optional[EvaluationLogDownloadResponse] = None
-
     def _sanitize_artifact_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
         allowed_keys = {"object_key", "uploaded_at", "public_url"}
         return {key: data[key] for key in allowed_keys if data.get(key) is not None}
 
+    def _build_download_info(
+        artifact: Dict[str, Any],
+    ) -> Optional[EvaluationLogDownloadResponse]:
+        public_url = artifact.get("public_url")
+        if public_url:
+            return EvaluationLogDownloadResponse(url=public_url)
+
+        object_key = artifact.get("object_key")
+        if not object_key:
+            return None
+
+        if not backend_service.submission_storage:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Log storage not configured; cannot generate download URL",
+            )
+
+        try:
+            download_url, expires_at = (
+                backend_service.submission_storage.generate_download_url(
+                    object_key,
+                    backend_service.submission_download_url_ttl,
+                )
+            )
+            return EvaluationLogDownloadResponse(
+                url=download_url, expires_at=expires_at
+            )
+        except Exception as exc:  # pragma: no cover - S3 failure path
+            logger.exception(
+                "Failed to generate log download URL for result %s",
+                eval_result.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to generate log download URL",
+            ) from exc
+
+    artifact_metadata: Optional[Dict[str, Any]] = None
+    download_info: Optional[EvaluationLogDownloadResponse] = None
     if isinstance(log_artifact, dict):
         artifact_metadata = _sanitize_artifact_metadata(log_artifact)
-
-        public_url = log_artifact.get("public_url")
-        if public_url:
-            download_info = EvaluationLogDownloadResponse(url=public_url)
-        else:
-            object_key = log_artifact.get("object_key")
-            if object_key:
-                if not backend_service.submission_storage:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Log storage not configured; cannot generate download URL",
-                    )
-                try:
-                    download_url, expires_at = (
-                        backend_service.submission_storage.generate_download_url(
-                            object_key,
-                            backend_service.submission_download_url_ttl,
-                        )
-                    )
-                    download_info = EvaluationLogDownloadResponse(
-                        url=download_url,
-                        expires_at=expires_at,
-                    )
-                except Exception as exc:  # pragma: no cover - S3 failure path
-                    logger.exception(
-                        "Failed to generate log download URL for result %s",
-                        eval_result.id,
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Failed to generate log download URL",
-                    ) from exc
+        download_info = _build_download_info(log_artifact)
 
     if not (log_artifact or pod_logs or summary):
         raise HTTPException(
