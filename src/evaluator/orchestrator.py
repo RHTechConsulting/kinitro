@@ -331,32 +331,6 @@ class Orchestrator:
 
         return job_context
 
-    def _serialize_env_result(self, env_result: EnvResult) -> Dict[str, Any]:
-        """Convert an EnvResult into a JSON-friendly structure."""
-        env_spec = env_result.env_spec
-        return {
-            "env_name": env_spec.env_name,
-            "benchmark_name": env_spec.benchmark_name,
-            "provider": env_spec.provider,
-            "config": _sanitize_for_json(env_spec.config),
-            "episodes_per_task": env_spec.episodes_per_task,
-            "max_episode_steps": env_spec.max_episode_steps,
-            "render_mode": env_spec.render_mode,
-            "success_rate": env_result.success_rate,
-            "mean_reward": env_result.mean_reward,
-            "mean_steps": env_result.mean_steps,
-            "episodes": [
-                {
-                    "episode_id": episode.episode_id,
-                    "reward": episode.reward,
-                    "steps": episode.steps,
-                    "success": episode.success,
-                    "info": _sanitize_for_json(episode.info),
-                }
-                for episode in env_result.episodes
-            ],
-        }
-
     def _build_log_payload(
         self,
         *,
