@@ -1,8 +1,10 @@
 import asyncio
+import functools
 import gc
 import threading
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 import ray
@@ -19,6 +21,7 @@ from core.log import get_logger
 from core.messages import EvalJobMessage, EvalResultMessage, JobStatusUpdateMessage
 from evaluator.config import EvaluatorConfig
 from evaluator.containers import Containers, PodSchedulingError
+from evaluator.log_uploader import EvaluationLogUploader
 from evaluator.rollout import BenchmarkSpec, RolloutCluster
 from evaluator.rollout.envs import EnvResult
 from evaluator.rpc.rpc_process import RPCProcess
@@ -35,6 +38,26 @@ EVAL_TIMEOUT = 900
 RAY_WAIT_TIMEOUT = 0.1
 MIN_CONCURRENT_JOBS = 4
 RESOURCE_BACKOFF_SECONDS = 15
+POD_LOG_TAIL_LINES = 200
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """Best-effort conversion of Python objects to JSON-safe types."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _sanitize_for_json(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_for_json(item) for item in value]
+    try:
+        dumped = value.model_dump()  # type: ignore[attr-defined]
+        return _sanitize_for_json(dumped)
+    except Exception:
+        return str(value)
 
 
 class Orchestrator:
@@ -46,6 +69,12 @@ class Orchestrator:
         self.keypair = load_hotkey_keypair(
             wallet_name=config.settings["wallet_name"],
             hotkey_name=config.settings["hotkey_name"],
+        )
+
+        self.log_uploader: Optional[EvaluationLogUploader] = (
+            EvaluationLogUploader(self.config.s3_config)
+            if self.config.s3_config
+            else None
         )
 
         # Track running jobs for concurrent execution
@@ -173,6 +202,7 @@ class Orchestrator:
         containers = Containers()
         pod = containers.create_container(
             eval_job_msg.submission_id,
+            eval_job_msg.job_id,
             archive_url=eval_job_msg.artifact_url,
             archive_sha256=eval_job_msg.artifact_sha256,
         )
@@ -182,7 +212,7 @@ class Orchestrator:
         config.load_kube_config()
         k8v1api = client.CoreV1Api()
         v1 = client.CoreV1Api()
-        service_name = f"submission-{eval_job_msg.submission_id}"
+        service_name = pod
         svc = k8v1api.read_namespaced_service(service_name, "default")
         node_port = None
         for port in svc.spec.ports:
@@ -300,6 +330,103 @@ class Orchestrator:
         )
 
         return job_context
+
+    def _build_log_payload(
+        self,
+        *,
+        job_context: Dict[str, Any],
+        eval_job_msg: EvalJobMessage,
+        status: EvaluationStatus,
+        summary: Dict[str, Any],
+        completed_at: datetime,
+        error: Optional[str] = None,
+        pod_logs: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a structured payload describing an evaluation job."""
+        start_time = job_context.get("start_time")
+        if isinstance(start_time, datetime):
+            duration_seconds = (completed_at - start_time).total_seconds()
+            started_at = start_time
+        else:
+            duration_seconds = None
+            started_at = None
+
+        payload: Dict[str, Any] = {
+            "schema_version": 1,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "job": {
+                "id": job_context.get("job_id"),
+                "submission_id": eval_job_msg.submission_id,
+                "competition_id": eval_job_msg.competition_id,
+                "miner_hotkey": eval_job_msg.miner_hotkey,
+                "validator_hotkey": self.keypair.ss58_address,
+                "hf_repo_id": eval_job_msg.hf_repo_id,
+                "benchmark_name": eval_job_msg.benchmark_name,
+                "env_provider": eval_job_msg.env_provider,
+                "config": _sanitize_for_json(eval_job_msg.config),
+                "status": status.value
+                if isinstance(status, EvaluationStatus)
+                else status,
+                "started_at": _sanitize_for_json(started_at),
+                "completed_at": completed_at.astimezone(timezone.utc).isoformat(),
+            },
+            "summary": _sanitize_for_json(summary),
+        }
+
+        if duration_seconds is not None:
+            payload["job"]["duration_seconds"] = duration_seconds
+
+        if pod_logs:
+            payload["pod_logs"] = _sanitize_for_json(pod_logs)
+
+        if error:
+            payload["error"] = error
+
+        return payload
+
+    async def _upload_job_log_bundle(
+        self,
+        *,
+        job_context: Dict[str, Any],
+        eval_job_msg: EvalJobMessage,
+        status: EvaluationStatus,
+        summary: Dict[str, Any],
+        completed_at: datetime,
+        error: Optional[str] = None,
+        pod_logs: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Serialize and upload the job log bundle, returning storage metadata."""
+        if not self.log_uploader:
+            return None
+
+        payload = self._build_log_payload(
+            job_context=job_context,
+            eval_job_msg=eval_job_msg,
+            status=status,
+            summary=summary,
+            completed_at=completed_at,
+            error=error,
+            pod_logs=pod_logs,
+        )
+
+        loop = asyncio.get_running_loop()
+        try:
+            metadata = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self.log_uploader.upload_log_bundle,
+                    submission_id=eval_job_msg.submission_id,
+                    job_id=eval_job_msg.job_id,
+                    payload=payload,
+                ),
+            )
+            return metadata
+        except Exception:
+            logger.exception(
+                "Failed to upload evaluation log bundle for job %s",
+                eval_job_msg.job_id,
+            )
+            return None
 
     async def _enqueue_job_for_processing(self, eval_job_msg: EvalJobMessage) -> None:
         """Requeue an evaluation job onto PgQueuer for processing."""
@@ -432,19 +559,76 @@ class Orchestrator:
                     avg_success_rate = 0.0
                     avg_reward = 0.0
 
+                completed_at = datetime.now(timezone.utc)
+                summary_data: Dict[str, Any] = {
+                    "results_count": len(results),
+                    "total_episodes": total_episodes,
+                    "avg_success_rate": avg_success_rate,
+                    "avg_reward": avg_reward,
+                    "completed_at": completed_at.isoformat(),
+                }
+                start_time = job_context.get("start_time")
+                if isinstance(start_time, datetime):
+                    summary_data["started_at"] = start_time.astimezone(
+                        timezone.utc
+                    ).isoformat()
+                    summary_data["duration_seconds"] = (
+                        completed_at - start_time
+                    ).total_seconds()
+
+                containers = Containers()
+                pod_logs: Optional[Dict[str, Any]] = None
+                try:
+                    pod_logs = containers.collect_container_logs(
+                        submission_id, job_id, tail_lines=POD_LOG_TAIL_LINES
+                    )
+                except Exception as log_exc:
+                    logger.warning(
+                        "Failed to collect pod logs for submission %s (job %s): %s",
+                        submission_id,
+                        job_id,
+                        log_exc,
+                    )
+
+                log_artifact = await self._upload_job_log_bundle(
+                    job_context=job_context,
+                    eval_job_msg=eval_job_msg,
+                    status=EvaluationStatus.COMPLETED,
+                    summary=summary_data,
+                    completed_at=completed_at,
+                    error=None,
+                    pod_logs=pod_logs,
+                )
+
                 # Update database
                 try:
                     self.db.update_evaluation_job(
                         job_id,
                         {
                             "status": EvaluationStatus.COMPLETED,
-                            "completed_at": datetime.now(timezone.utc),
+                            "completed_at": completed_at,
                         },
                     )
                 except Exception as e:
                     logger.error(f"Failed to update job status for job {job_id}: {e}")
 
                 # Queue result message
+                logs_message = "Evaluation completed successfully"
+                if log_artifact:
+                    artifact_ref = log_artifact.get("public_url") or log_artifact.get(
+                        "object_key"
+                    )
+                    if artifact_ref:
+                        logs_message = f"{logs_message}. Log bundle: {artifact_ref}"
+                extra_data: Dict[str, Any] = {"summary": summary_data}
+                if log_artifact:
+                    extra_data["log_artifact"] = log_artifact
+                elif pod_logs:
+                    extra_data["pod_logs"] = pod_logs
+                    logs_message = (
+                        f"{logs_message}. Container logs attached to result payload."
+                    )
+
                 eval_result_msg = EvalResultMessage(
                     job_id=job_id,
                     validator_hotkey=self.keypair.ss58_address,
@@ -457,9 +641,9 @@ class Orchestrator:
                     success_rate=avg_success_rate,
                     avg_reward=avg_reward,
                     total_episodes=total_episodes,
-                    logs="Evaluation completed successfully",
+                    logs=logs_message,
                     error=None,
-                    extra_data=None,
+                    extra_data=extra_data,
                 )
                 await self.db.queue_evaluation_result_msg(eval_result_msg)
 
@@ -481,10 +665,11 @@ class Orchestrator:
                         logger.info(f"Cleaned up Ray worker for job {job_id}")
 
                     # Then clean up container
-                    containers = Containers()
-                    containers.cleanup_container(submission_id)
+                    containers.cleanup_container(submission_id, job_id)
                     logger.info(
-                        f"Cleaned up container resources for submission {submission_id}"
+                        "Cleaned up container resources for submission %s (job %s)",
+                        submission_id,
+                        job_id,
                     )
 
                     # Clear references
@@ -504,12 +689,59 @@ class Orchestrator:
             if elapsed > self.job_timeout:
                 logger.error(f"Job {job_id} timed out after {elapsed} seconds")
                 ray.cancel(evaluation_future)
+                completed_at = datetime.now(timezone.utc)
+                timeout_detail = f"Job timed out after {elapsed:.1f} seconds"
+                summary_data: Dict[str, Any] = {
+                    "elapsed_seconds": elapsed,
+                    "timeout_seconds": self.job_timeout,
+                    "completed_at": completed_at.isoformat(),
+                }
+                start_time = job_context.get("start_time")
+                if isinstance(start_time, datetime):
+                    summary_data["started_at"] = start_time.astimezone(
+                        timezone.utc
+                    ).isoformat()
+                    summary_data["duration_seconds"] = (
+                        completed_at - start_time
+                    ).total_seconds()
+
+                containers = Containers()
+                pod_logs: Optional[Dict[str, Any]] = None
+                try:
+                    pod_logs = containers.collect_container_logs(
+                        submission_id, job_id, tail_lines=POD_LOG_TAIL_LINES
+                    )
+                except Exception as log_exc:
+                    logger.warning(
+                        "Failed to collect pod logs for timed out submission %s (job %s): %s",
+                        submission_id,
+                        job_id,
+                        log_exc,
+                    )
+
+                log_artifact = await self._upload_job_log_bundle(
+                    job_context=job_context,
+                    eval_job_msg=eval_job_msg,
+                    status=EvaluationStatus.TIMEOUT,
+                    summary=summary_data,
+                    completed_at=completed_at,
+                    error=timeout_detail,
+                    pod_logs=pod_logs,
+                )
+
+                error_message = timeout_detail
+                if log_artifact:
+                    artifact_ref = log_artifact.get("public_url") or log_artifact.get(
+                        "object_key"
+                    )
+                    if artifact_ref:
+                        error_message = f"{error_message}. Log bundle: {artifact_ref}"
                 self.db.update_evaluation_job(
                     job_id,
                     {
                         "status": EvaluationStatus.TIMEOUT,
-                        "error_message": f"Job timed out after {elapsed:.1f} seconds",
-                        "completed_at": datetime.now(timezone.utc),
+                        "error_message": error_message,
+                        "completed_at": completed_at,
                     },
                 )
 
@@ -531,10 +763,11 @@ class Orchestrator:
                         logger.info(f"Cleaned up Ray worker for timed out job {job_id}")
 
                     # Then clean up container
-                    containers = Containers()
-                    containers.cleanup_container(submission_id)
+                    containers.cleanup_container(submission_id, job_id)
                     logger.info(
-                        f"Cleaned up container resources for timed out submission {submission_id}"
+                        "Cleaned up container resources for timed out submission %s (job %s)",
+                        submission_id,
+                        job_id,
                     )
 
                     gc.collect()
@@ -549,12 +782,59 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Error monitoring job {job_id}: {e}")
+            completed_at = datetime.now(timezone.utc)
+            error_detail = str(e)
+            summary_data: Dict[str, Any] = {
+                "exception_type": type(e).__name__,
+                "message": error_detail,
+                "completed_at": completed_at.isoformat(),
+            }
+            start_time = job_context.get("start_time")
+            if isinstance(start_time, datetime):
+                summary_data["started_at"] = start_time.astimezone(
+                    timezone.utc
+                ).isoformat()
+                summary_data["duration_seconds"] = (
+                    completed_at - start_time
+                ).total_seconds()
+
+            containers = Containers()
+            pod_logs: Optional[Dict[str, Any]] = None
+            try:
+                pod_logs = containers.collect_container_logs(
+                    submission_id, job_id, tail_lines=POD_LOG_TAIL_LINES
+                )
+            except Exception as log_exc:
+                logger.warning(
+                    "Failed to collect pod logs for failed submission %s (job %s): %s",
+                    submission_id,
+                    job_id,
+                    log_exc,
+                )
+
+            log_artifact = await self._upload_job_log_bundle(
+                job_context=job_context,
+                eval_job_msg=eval_job_msg,
+                status=EvaluationStatus.FAILED,
+                summary=summary_data,
+                completed_at=completed_at,
+                error=error_detail,
+                pod_logs=pod_logs,
+            )
+
+            error_message = error_detail
+            if log_artifact:
+                artifact_ref = log_artifact.get("public_url") or log_artifact.get(
+                    "object_key"
+                )
+                if artifact_ref:
+                    error_message = f"{error_message}. Log bundle: {artifact_ref}"
             self.db.update_evaluation_job(
                 job_id,
                 {
                     "status": EvaluationStatus.FAILED,
-                    "error_message": str(e),
-                    "completed_at": datetime.now(timezone.utc),
+                    "error_message": error_message,
+                    "completed_at": completed_at,
                 },
             )
 
@@ -576,10 +856,11 @@ class Orchestrator:
                     logger.info(f"Cleaned up Ray worker for failed job {job_id}")
 
                 # Then clean up container
-                containers = Containers()
-                containers.cleanup_container(submission_id)
+                containers.cleanup_container(submission_id, job_id)
                 logger.info(
-                    f"Cleaned up container resources for failed submission {submission_id}"
+                    "Cleaned up container resources for failed submission %s (job %s)",
+                    submission_id,
+                    job_id,
                 )
 
                 gc.collect()
@@ -733,15 +1014,19 @@ class Orchestrator:
                     if job.submission_id:
                         try:
                             containers = Containers()
-                            containers.cleanup_container(job.submission_id, wait=True)
+                            containers.cleanup_container(
+                                job.submission_id, job.id, wait=True
+                            )
                             logger.info(
-                                "Cleaned up orphaned container for submission %s",
+                                "Cleaned up orphaned container for submission %s (job %s)",
                                 job.submission_id,
+                                job.id,
                             )
                         except Exception as cleanup_err:
                             logger.warning(
-                                "Failed to cleanup container for submission %s: %s",
+                                "Failed to cleanup container for submission %s (job %s): %s",
                                 job.submission_id,
+                                job.id,
                                 cleanup_err,
                             )
 
@@ -838,9 +1123,13 @@ class Orchestrator:
                             ).total_seconds() > self.job_timeout:
                                 try:
                                     if job.submission_id:
-                                        containers.cleanup_container(job.submission_id)
+                                        containers.cleanup_container(
+                                            job.submission_id, job.id
+                                        )
                                         logger.debug(
-                                            f"Cleaned up container for old job {job.id}"
+                                            "Cleaned up container for old job %s (submission %s)",
+                                            job.id,
+                                            job.submission_id,
                                         )
                                 except Exception as e:
                                     logger.debug(
@@ -912,7 +1201,7 @@ class Orchestrator:
                 submission_id = job_context.get("submission_id")
                 if submission_id:
                     containers = Containers()
-                    containers.cleanup_container(submission_id)
+                    containers.cleanup_container(submission_id, job_id)
             except Exception as e:
                 logger.error(f"Error cleaning up job {job_id}: {e}")
             finally:

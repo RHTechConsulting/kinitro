@@ -1,6 +1,7 @@
 import os
 import time
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, Optional
 
 import dotenv
 import yaml
@@ -21,6 +22,9 @@ class PodSchedulingError(RuntimeError):
         self.retryable = retryable
 
 
+RUNNER_CONTAINER_NAME = "runner"
+
+
 class Containers:
     DELETE_TIMEOUT_SECONDS = 60
     DELETE_RETRY_INTERVAL = 5
@@ -29,6 +33,12 @@ class Containers:
     POD_READY_TIMEOUT_SECONDS = 600
     POD_POLL_INTERVAL_SECONDS = 2.0
     POD_UNSCHEDULABLE_GRACE_SECONDS = 10
+
+    @staticmethod
+    def build_resource_name(submission_id: SnowflakeId, job_id: SnowflakeId) -> str:
+        """Construct a unique resource name for a submission/job combination."""
+
+        return f"submission-{submission_id}-job-{job_id}"
 
     @staticmethod
     def _set_env(container_spec: dict, name: str, value: str | None) -> None:
@@ -64,42 +74,117 @@ class Containers:
             print(f"Error retrieving pod events for {pod_name}: {e}")
 
     @staticmethod
+    def _collect_pod_container_logs(
+        core_api: client.CoreV1Api,
+        pod_name: str,
+        *,
+        namespace: str = "default",
+        tail_lines: int = 200,
+        container_names: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        """Return raw log text for all containers on a pod."""
+
+        result: Dict[str, Any] = {
+            "pod_name": pod_name,
+            "namespace": namespace,
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "containers": {},
+        }
+
+        try:
+            pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+        except ApiException as exc:
+            result["error"] = f"{exc.status}: {exc.reason}"
+            return result
+        except Exception as exc:
+            result["error"] = str(exc)
+            return result
+
+        container_specs = []
+        if pod.spec:
+            if pod.spec.init_containers:
+                container_specs.extend(pod.spec.init_containers)
+            if pod.spec.containers:
+                container_specs.extend(pod.spec.containers)
+
+        if not container_specs:
+            result["warning"] = "Pod spec contained no containers"
+            return result
+
+        container_filter = None
+        if container_names:
+            container_filter = {name for name in container_names if name}
+
+        matched_any = False
+        for container in container_specs:
+            container_name = getattr(container, "name", None)
+            if not container_name:
+                continue
+
+            if container_filter is not None and container_name not in container_filter:
+                continue
+
+            matched_any = True
+            entry: Dict[str, Optional[str]] = {}
+            try:
+                log_text = core_api.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    container=container_name,
+                    tail_lines=tail_lines,
+                )
+                entry["log"] = log_text
+            except ApiException as exc:
+                entry["error"] = f"{exc.status}: {exc.reason}"
+            except Exception as exc:
+                entry["error"] = str(exc)
+
+            result["containers"][container_name] = entry
+
+        if container_filter is not None and not matched_any:
+            result["warning"] = (
+                f"No containers matched filter: {sorted(container_filter)}"
+            )
+
+        return result
+
+    @staticmethod
     def _print_pod_logs(core_api: client.CoreV1Api, pod_name: str) -> None:
         """Print logs for init and main containers."""
 
         try:
-            print(f"Getting init container logs for {pod_name}...")
-            try:
-                init_logs = core_api.read_namespaced_pod_log(
-                    name=pod_name,
-                    namespace="default",
-                    container="fetch-submission",
-                    tail_lines=100,
-                )
-                print(f"Init container logs for {pod_name}:\n{init_logs}")
-            except Exception as exc:
-                print(f"Error retrieving init container logs: {exc}")
-
-            print(f"Getting runner container logs for {pod_name}...")
-            try:
-                runner_logs = core_api.read_namespaced_pod_log(
-                    name=pod_name,
-                    namespace="default",
-                    container="runner",
-                    tail_lines=100,
-                )
-                print(f"Runner container logs for {pod_name}:\n{runner_logs}")
-            except Exception as exc:
-                print(f"Error retrieving runner container logs: {exc}")
-
+            logs = Containers._collect_pod_container_logs(
+                core_api, pod_name, tail_lines=100
+            )
         except Exception as exc:
             print(f"Error retrieving container logs for {pod_name}: {exc}")
+            return
+
+        if logs.get("error"):
+            print(
+                f"Failed to retrieve pod logs for {pod_name}: {logs['error']}",
+            )
+            return
+
+        containers = logs.get("containers", {})
+        if not containers:
+            print(f"No container logs available for {pod_name}")
+            return
+
+        for container_name, entry in containers.items():
+            print(f"Logs for {pod_name}/{container_name}:")
+            log_text = entry.get("log")
+            if log_text:
+                print(log_text)
+            else:
+                print(f"No logs available ({entry.get('error', 'unknown error')})")
 
     def _handle_failed_pod(
         self,
         core_api: client.CoreV1Api,
         pod_name: str,
         submission_id: SnowflakeId,
+        job_id: SnowflakeId,
     ) -> None:
         """Capture diagnostics and tear down a failed pod."""
 
@@ -107,24 +192,25 @@ class Containers:
         self._log_pod_events(core_api, pod_name)
 
         try:
-            self.cleanup_container(submission_id, wait=False)
+            self.cleanup_container(submission_id, job_id, wait=False)
         except Exception as exc:
             print(f"Error cleaning up failed pod {pod_name}: {exc}")
 
     def create_container(
         self,
         submission_id: SnowflakeId,
+        job_id: SnowflakeId,
         *,
         archive_url: str,
         archive_sha256: str | None = None,
         port: int = 8000,
     ) -> str:
-        print(f"Creating container for submission {submission_id}")
+        print(f"Creating container for submission {submission_id} (job {job_id})")
         print(f"Fetching artifact from {archive_url}")
         config.load_kube_config()
         k8v1api = client.CoreV1Api()
 
-        container_name = f"submission-{submission_id}"
+        container_name = self.build_resource_name(submission_id, job_id)
 
         # Load podspec from YAML template
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -280,7 +366,7 @@ class Containers:
 
         except Exception:
             if pod_created:
-                self._handle_failed_pod(k8v1api, container_name, submission_id)
+                self._handle_failed_pod(k8v1api, container_name, submission_id, job_id)
             raise
 
         if pod_ready:
@@ -348,16 +434,14 @@ class Containers:
 
         return container_name
 
-    def destroy_container(self, container_id: SnowflakeId) -> None:
-        """Delete the pod with the given container ID.
-
-        Args:
-            container_id: The ID of the container to destroy
-        """
+    def destroy_container(
+        self, submission_id: SnowflakeId, job_id: SnowflakeId
+    ) -> None:
+        """Delete the pod associated with a submission/job pair."""
         config.load_kube_config()
         v1 = client.CoreV1Api()
 
-        container_name = f"submission-{container_id}"
+        container_name = self.build_resource_name(submission_id, job_id)
         try:
             v1.delete_namespaced_pod(name=container_name, namespace="default")
             print(f"Pod {container_name} deleted successfully")
@@ -365,7 +449,11 @@ class Containers:
             print(f"Error deleting pod {container_name}: {e}")
 
     def cleanup_container(
-        self, submission_id: SnowflakeId, *, wait: bool = False
+        self,
+        submission_id: SnowflakeId,
+        job_id: SnowflakeId,
+        *,
+        wait: bool = False,
     ) -> None:
         """Clean up both the pod and service for a submission.
 
@@ -376,7 +464,7 @@ class Containers:
         config.load_kube_config()
         v1 = client.CoreV1Api()
 
-        container_name = f"submission-{submission_id}"
+        container_name = self.build_resource_name(submission_id, job_id)
         service_name = container_name  # Service has the same name as the pod
 
         # Delete the service first
@@ -428,6 +516,29 @@ class Containers:
                 if api_exc.status == 404:
                     return
                 raise
+
+    def collect_container_logs(
+        self,
+        submission_id: SnowflakeId,
+        job_id: SnowflakeId,
+        *,
+        namespace: str = "default",
+        tail_lines: int = 200,
+    ) -> Dict[str, Any]:
+        """Collect logs for all containers associated with a submission pod."""
+
+        config.load_kube_config()
+        core_api = client.CoreV1Api()
+        pod_name = self.build_resource_name(submission_id, job_id)
+
+        return self._collect_pod_container_logs(
+            core_api,
+            pod_name,
+            namespace=namespace,
+            tail_lines=tail_lines,
+            # NOTE: we only upload logs from the "runner" container
+            container_names=[RUNNER_CONTAINER_NAME],
+        )
 
     def _wait_for_service_absence(
         self, core_api: client.CoreV1Api, service_name: str, namespace: str = "default"

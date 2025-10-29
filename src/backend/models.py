@@ -4,7 +4,7 @@ SQLModel models for Kinitro Backend database.
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import field_validator
 from sqlalchemy import (
@@ -250,6 +250,35 @@ class EvaluationResultResponse(SQLModel):
         from_attributes = True
 
     @field_validator("id", "job_id", mode="before")
+    @classmethod
+    def _convert_ids(cls, value):
+        return str(value)
+
+
+class EvaluationLogDownloadResponse(SQLModel):
+    """Response model describing a downloadable evaluator log bundle."""
+
+    url: str
+    expires_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EvaluationResultLogResponse(SQLModel):
+    """Detailed evaluator log information for a result."""
+
+    result_id: str
+    job_id: str
+    summary: Optional[Dict[str, Any]] = None
+    download: Optional[EvaluationLogDownloadResponse] = None
+    artifact_metadata: Optional[Dict[str, Any]] = None
+    inline_logs: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+    @field_validator("result_id", "job_id", mode="before")
     @classmethod
     def _convert_ids(cls, value):
         return str(value)
