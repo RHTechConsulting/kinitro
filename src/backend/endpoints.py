@@ -88,6 +88,8 @@ from .models import (
     CompetitionResponse,
     EpisodeData,
     EpisodeStepData,
+    EvaluationLogDownloadResponse,
+    EvaluationResultLogResponse,
     EvaluationResultResponse,
     JobResponse,
     JobStatusResponse,
@@ -1532,6 +1534,200 @@ async def get_result(result_id: int):
             )
 
         return EvaluationResultResponse.model_validate(eval_result)
+
+
+async def _resolve_log_response(
+    eval_result: BackendEvaluationResult,
+) -> EvaluationResultLogResponse:
+    """Internal helper to build the log response payload."""
+
+    extra_data = eval_result.extra_data or {}
+    summary = extra_data.get("summary")
+    pod_logs = extra_data.get("pod_logs")
+    log_artifact = extra_data.get("log_artifact")
+
+    artifact_metadata: Optional[Dict[str, Any]] = None
+    download_info: Optional[EvaluationLogDownloadResponse] = None
+
+    def _sanitize_artifact_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
+        allowed_keys = {"object_key", "uploaded_at", "public_url"}
+        return {key: data[key] for key in allowed_keys if data.get(key) is not None}
+
+    if isinstance(log_artifact, dict):
+        artifact_metadata = _sanitize_artifact_metadata(log_artifact)
+
+        public_url = log_artifact.get("public_url")
+        if public_url:
+            download_info = EvaluationLogDownloadResponse(url=public_url)
+        else:
+            object_key = log_artifact.get("object_key")
+            if object_key:
+                if not backend_service.submission_storage:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Log storage not configured; cannot generate download URL",
+                    )
+                try:
+                    download_url, expires_at = (
+                        backend_service.submission_storage.generate_download_url(
+                            object_key,
+                            backend_service.submission_download_url_ttl,
+                        )
+                    )
+                    download_info = EvaluationLogDownloadResponse(
+                        url=download_url,
+                        expires_at=expires_at,
+                    )
+                except Exception as exc:  # pragma: no cover - S3 failure path
+                    logger.exception(
+                        "Failed to generate log download URL for result %s",
+                        eval_result.id,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Failed to generate log download URL",
+                    ) from exc
+
+    if not (log_artifact or pod_logs or summary):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No evaluator logs available for this result",
+        )
+
+    return EvaluationResultLogResponse(
+        result_id=eval_result.id,
+        job_id=eval_result.job_id,
+        summary=summary,
+        download=download_info,
+        artifact_metadata=artifact_metadata,
+        inline_logs=pod_logs,
+    )
+
+
+@app.get("/results/{result_id}/logs", response_model=EvaluationResultLogResponse)
+async def get_result_logs(result_id: int):
+    """Retrieve evaluator log metadata and download information for a result."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        result = await session.execute(
+            select(BackendEvaluationResult).where(
+                BackendEvaluationResult.id == result_id
+            )
+        )
+        eval_result = result.scalar_one_or_none()
+
+        if not eval_result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Result not found"
+            )
+
+        return await _resolve_log_response(eval_result)
+
+
+@app.get("/jobs/{job_id}/logs", response_model=List[EvaluationResultLogResponse])
+async def get_job_logs(job_id: int):
+    """Retrieve evaluator logs for all results associated with a job."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        results = await session.execute(
+            select(BackendEvaluationResult)
+            .where(BackendEvaluationResult.job_id == job_id)
+            .order_by(BackendEvaluationResult.result_time.desc())
+        )
+        eval_results = results.scalars().all()
+
+        if not eval_results:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No evaluation results found for this job",
+            )
+
+        responses: List[EvaluationResultLogResponse] = []
+        for result_row in eval_results:
+            try:
+                responses.append(await _resolve_log_response(result_row))
+            except HTTPException as exc:
+                if exc.status_code == status.HTTP_404_NOT_FOUND:
+                    continue
+                raise
+
+        if not responses:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No evaluator logs available for this job",
+            )
+
+        return responses
+
+
+@app.get(
+    "/submissions/{submission_id}/logs",
+    response_model=List[EvaluationResultLogResponse],
+)
+async def get_submission_logs(submission_id: int):
+    """Retrieve evaluator logs for all jobs (and their results) tied to a submission."""
+    if not backend_service.async_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized",
+        )
+
+    async with backend_service.async_session() as session:
+        jobs = await session.execute(
+            select(BackendEvaluationJob.id).where(
+                BackendEvaluationJob.submission_id == submission_id
+            )
+        )
+        job_ids = [row[0] for row in jobs.all()]
+
+        if not job_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No jobs found for this submission",
+            )
+
+        results = await session.execute(
+            select(BackendEvaluationResult)
+            .where(BackendEvaluationResult.job_id.in_(job_ids))
+            .order_by(
+                BackendEvaluationResult.job_id,
+                BackendEvaluationResult.result_time.desc(),
+            )
+        )
+        eval_results = results.scalars().all()
+
+        if not eval_results:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No evaluation results found for this submission",
+            )
+
+        responses: List[EvaluationResultLogResponse] = []
+        for result_row in eval_results:
+            try:
+                responses.append(await _resolve_log_response(result_row))
+            except HTTPException as exc:
+                if exc.status_code == status.HTTP_404_NOT_FOUND:
+                    continue
+                raise
+
+        if not responses:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No evaluator logs available for this submission",
+            )
+
+        return responses
 
 
 # ============================================================================
