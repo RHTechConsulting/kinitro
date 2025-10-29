@@ -33,30 +33,61 @@ class AgentClient:
         self.agent = None
         self.stream = None
 
-    async def connect(self, timeout: float = 30.0):
+    async def connect(
+        self,
+        timeout: float = 30.0,
+        *,
+        max_attempts: int = 5,
+        base_retry_delay: float = 1.0,
+    ):
         """Connect asynchronously using AsyncIoStream and create a TwoPartyClient with a raised traversal limit."""
         print(f"Connecting to {self.address}:{self.port}")
         if self.agent is not None:
             print(f"Already connected to {self.address}:{self.port}")
             return
 
-        try:
-            self.stream = await asyncio.wait_for(
-                capnp.AsyncIoStream.create_connection(
-                    host=self.address, port=self.port
-                ),
-                timeout=timeout,
-            )
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.stream = await asyncio.wait_for(
+                    capnp.AsyncIoStream.create_connection(
+                        host=self.address, port=self.port
+                    ),
+                    timeout=timeout,
+                )
 
-            # Create TwoPartyClient with increased traversal limit (workaround for large messages)
-            self.client = capnp.TwoPartyClient(self.stream)
-            print(f"TwoPartyClient established to {self.address}:{self.port}")
+                # Create TwoPartyClient with increased traversal limit (workaround for large messages)
+                self.client = capnp.TwoPartyClient(self.stream)
+                print(f"TwoPartyClient established to {self.address}:{self.port}")
 
-            self.agent = self.client.bootstrap().cast_as(agent_capnp.Agent)
-            print("Bootstrapped Agent capability")
-        except Exception:
-            logger.exception("Failed to connect to agent")
-            raise
+                self.agent = self.client.bootstrap().cast_as(agent_capnp.Agent)
+                print("Bootstrapped Agent capability")
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    logger.exception(
+                        "Failed to connect to agent at %s:%s after %d attempts",
+                        self.address,
+                        self.port,
+                        max_attempts,
+                    )
+                    raise
+
+                retry_delay = base_retry_delay * attempt
+                logger.warning(
+                    "Attempt %d/%d to connect to agent at %s:%s failed: %s; retrying in %.1fs",
+                    attempt,
+                    max_attempts,
+                    self.address,
+                    self.port,
+                    exc,
+                    retry_delay,
+                )
+                await asyncio.sleep(retry_delay)
+
+        if last_exc:
+            raise last_exc
 
     async def _await_capnp_result(self, maybe_promise, timeout: float):
         """Handle either promise-like (has a_wait) or coroutine-like awaitable from pycapnp."""
