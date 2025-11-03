@@ -8,7 +8,8 @@ import sys
 
 from core.log import get_logger
 
-from .config import ValidatorConfig
+from .config import ValidatorConfig, ValidatorMode
+from .lite_validator import LiteValidator
 from .websocket_validator import WebSocketValidator
 
 logger = get_logger(__name__)
@@ -21,6 +22,10 @@ class ValidatorService:
         self.config = ValidatorConfig()
         self.validator = None
         self._shutdown_event = asyncio.Event()
+        mode_value = self.config.settings.get(
+            "validator_mode", ValidatorMode.FULL.value
+        )
+        self.mode = ValidatorMode(mode_value)
 
     def setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
@@ -35,10 +40,15 @@ class ValidatorService:
     async def run(self):
         """Run the validator service."""
         try:
-            logger.info("Starting Kinitro WebSocket Validator Service")
+            logger.info("Starting Kinitro Validator Service (mode=%s)", self.mode.value)
 
-            # Create validator instance
-            self.validator = WebSocketValidator(self.config)
+            match self.mode:
+                case ValidatorMode.LITE:
+                    self.validator = LiteValidator(self.config)
+                case ValidatorMode.FULL:
+                    self.validator = WebSocketValidator(self.config)
+                case _:
+                    raise ValueError(f"Unknown validator mode: {self.mode}")
 
             # Start validator in background
             validator_task = asyncio.create_task(self.validator.start())

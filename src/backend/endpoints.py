@@ -53,6 +53,7 @@ from backend.service import (
     LeaderCandidateNotFoundError,
     NoBenchmarksAvailableError,
     SubmissionNotFoundError,
+    WeightsSnapshot,
 )
 from core import __version__ as VERSION  # noqa: N812
 from core.db.models import EvaluationStatus, SnowflakeId
@@ -427,6 +428,18 @@ async def health_check() -> dict:
         "chain_connected": backend_service.substrate is not None,
         "database_connected": backend_service.engine is not None,
     }
+
+
+@app.get("/weights", response_model=WeightsSnapshot)
+async def get_latest_weights() -> WeightsSnapshot:
+    """Expose the most recent weight snapshot for validators and monitoring tools."""
+    snapshot = backend_service.get_latest_weights_snapshot()
+    if not snapshot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Weights not available yet",
+        )
+    return snapshot
 
 
 @app.post(
