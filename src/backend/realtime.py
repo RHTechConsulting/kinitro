@@ -6,10 +6,11 @@ including evaluation results, job status updates, episode data streaming, etc.
 """
 
 import asyncio
+import copy
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Union
 
 from fastapi import WebSocket
 from pydantic import BaseModel
@@ -61,6 +62,20 @@ except ImportError:
     pass
 
 logger = get_logger(__name__)
+
+
+def _base_job_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract the evaluator-facing config from a stored benchmark spec."""
+    try:
+        base_config_source = config["config"]
+    except KeyError as exc:  # pragma: no cover - defensive guard
+        raise ValueError("Benchmark spec is missing a 'config' entry") from exc
+    try:
+        base_config = dict(base_config_source)
+    except TypeError as exc:  # pragma: no cover - defensive guard
+        raise ValueError("Benchmark spec 'config' entry must be a mapping") from exc
+    return copy.deepcopy(base_config)
+
 
 CLIENT_SEND_QUEUE_MAXSIZE = 200
 CLIENT_SEND_TIMEOUT = 5.0
@@ -932,7 +947,7 @@ class RealtimeEventBroadcaster:
                     hf_repo_id=job.hf_repo_id,
                     env_provider=job.env_provider,
                     benchmark_name=job.benchmark_name,
-                    config=job.config if job.config else {},
+                    config=_base_job_config(job.config),
                     status=current_status,
                     validator_statuses=validator_statuses_map.get(job.id, {}),
                 )
