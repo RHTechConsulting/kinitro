@@ -20,16 +20,17 @@ curl -X POST "$BACKEND_URL/competitions" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ADMIN_API_KEY" \
   -d '{
-    "name": "MT10-baby",
-    "description": "MetaWorld MT10 test competition",
+    "name": "MT1-pick",
+    "description": "MetaWorld MT1 test competition",
     "benchmarks": [
         {
             "provider": "metaworld",
-            "benchmark_name": "MT10",
+            "benchmark_name": "MT1",
             "config": {
                 "episodes_per_task": 1,
                 "max_episode_steps": 50,
-                "tasks_per_env": 2
+                "tasks_per_env": 5,
+                "env_name": "pick-place-v3"
             }
         }
     ],

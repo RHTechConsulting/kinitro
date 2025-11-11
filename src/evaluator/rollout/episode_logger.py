@@ -238,38 +238,32 @@ class EpisodeLogger:
         # Coerce success to bool and fall back to logged step info if needed
         final_success = bool(success) or self._infer_success_from_steps()
 
-        # Check if we should log this episode based on interval
-        should_log_episode = self._episode_count % self.config.episode_log_interval == 0
+        episode_data = {
+            "job_id": self.job_id,
+            "submission_id": self.submission_id,
+            "task_id": self.task_id,
+            "episode_id": self._current_episode_id,
+            "env_name": self.env_name,
+            "benchmark_name": self.benchmark_name,
+            "final_reward": final_reward,
+            "success": final_success,
+            "steps": len(self._current_episode_steps),
+            "start_time": self._current_episode_start,
+            "end_time": datetime.now(timezone.utc),
+            "extra_metrics": extra_metrics or {},
+        }
 
-        if should_log_episode:
-            episode_data = {
-                "job_id": self.job_id,
-                "submission_id": self.submission_id,
-                "task_id": self.task_id,
-                "episode_id": self._current_episode_id,
-                "env_name": self.env_name,
-                "benchmark_name": self.benchmark_name,
-                "final_reward": final_reward,
-                "success": final_success,
-                "steps": len(self._current_episode_steps),
-                "start_time": self._current_episode_start,
-                "end_time": datetime.now(timezone.utc),
-                "extra_metrics": extra_metrics or {},
-            }
+        # Wait for all background uploads to complete before sending data
+        self._wait_for_uploads(timeout=OBS_UPLOAD_TIMEOUT)
 
-            # Wait for all background uploads to complete before sending data
-            self._wait_for_uploads(
-                timeout=OBS_UPLOAD_TIMEOUT
-            )  # 10 second timeout for uploads
+        # Queue episode to database if configured
+        if self.config.database_url:
+            await self._queue_episode_data(episode_data)
 
-            # Queue episode to database if configured
-            if self.config.database_url:
-                await self._queue_episode_data(episode_data)
-
-                # Queue all step data after episode is queued to avoid race condition
-                for step_data in self._current_episode_steps:
-                    if step_data.get("should_log", False):
-                        await self._queue_step_data(step_data)
+            # Queue all step data after episode is queued to avoid race condition
+            for step_data in self._current_episode_steps:
+                if step_data.get("should_log", False):
+                    await self._queue_step_data(step_data)
 
         # Reset for next episode
         self._current_episode_id = None
