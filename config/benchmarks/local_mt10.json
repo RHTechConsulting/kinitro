@@ -5,9 +5,12 @@
       "benchmark_name": "MT10",
       "config": {
         "episodes_per_task": 1,
-        "max_episode_steps": 50,
-        "tasks_per_env": 2
-      }
+        "max_episode_steps": 200,
+        "tasks_per_env": 5
+      },
+      "camera_names": [
+        "corner", "corner2", "corner3"
+      ]
     }
   ]
 }

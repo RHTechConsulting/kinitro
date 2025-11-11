@@ -1036,12 +1036,28 @@ class BackendService:
                         await self._acquire_episode_lock(session, key)
 
                         current_episode_id = episode_lookup.get(key)
+                        if current_episode_id is None and step_payloads:
+                            existing_episode_id = await self._get_episode_id_from_db(
+                                session, key
+                            )
+                            if existing_episode_id is not None:
+                                episode_lookup[key] = existing_episode_id
+                                current_episode_id = existing_episode_id
 
                         if episode_payload:
                             message: EpisodeDataMessage = episode_payload["message"]
                             validator_hotkey: SS58Address = episode_payload[
                                 "validator_hotkey"
                             ]
+                            logger.info(
+                                "Applying episode summary submission=%s task=%s episode=%s validator=%s reward=%s steps=%s",
+                                message.submission_id,
+                                message.task_id,
+                                message.episode_id,
+                                validator_hotkey,
+                                message.final_reward,
+                                message.steps,
+                            )
                             current_episode_id = await self._ensure_episode_record(
                                 message,
                                 validator_hotkey,
@@ -1096,6 +1112,13 @@ class BackendService:
                             placeholder_episode = self._placeholder_episode_from_step(
                                 step_payloads[0]["message"]
                             )
+                            logger.info(
+                                "Creating placeholder episode for submission=%s task=%s episode=%s validator=%s",
+                                placeholder_episode.submission_id,
+                                placeholder_episode.task_id,
+                                placeholder_episode.episode_id,
+                                step_payloads[0]["validator_hotkey"],
+                            )
                             current_episode_id = await self._ensure_episode_record(
                                 placeholder_episode,
                                 step_payloads[0]["validator_hotkey"],
@@ -1111,12 +1134,25 @@ class BackendService:
 
                             episode_lookup_id = episode_lookup.get(key)
                             if episode_lookup_id is None:
-                                fallback_episode, fallback_hotkey = (
-                                    self._build_episode_from_steps([step_payload])
+                                episode_lookup_id = await self._get_episode_id_from_db(
+                                    session, key
+                                )
+                                if episode_lookup_id is not None:
+                                    episode_lookup[key] = episode_lookup_id
+                            if episode_lookup_id is None:
+                                placeholder_episode = (
+                                    self._placeholder_episode_from_step(step_message)
+                                )
+                                logger.info(
+                                    "Creating placeholder episode for submission=%s task=%s episode=%s validator=%s",
+                                    placeholder_episode.submission_id,
+                                    placeholder_episode.task_id,
+                                    placeholder_episode.episode_id,
+                                    validator_hotkey,
                                 )
                                 episode_lookup_id = await self._ensure_episode_record(
-                                    fallback_episode,
-                                    fallback_hotkey,
+                                    placeholder_episode,
+                                    validator_hotkey,
                                     episode_lookup,
                                     session,
                                 )
@@ -1186,13 +1222,14 @@ class BackendService:
 
                         if episode_payload is None and step_payloads:
                             submission_id, episode_no, task_id, validator_key = key
-                            logger.warning(
-                                "Episode summary missing for submission=%s task=%s episode=%s validator=%s; using placeholder values",
-                                submission_id,
-                                task_id,
-                                episode_no,
-                                validator_key,
-                            )
+                            if episode_lookup.get(key) is None:
+                                logger.warning(
+                                    "Episode summary missing for submission=%s task=%s episode=%s validator=%s; using placeholder values",
+                                    submission_id,
+                                    task_id,
+                                    episode_no,
+                                    validator_key,
+                                )
 
                     await session.commit()
 
@@ -2900,7 +2937,39 @@ class BackendService:
         result = await session.execute(episode_insert)
         episode_db_id = result.scalar_one()
         lookup[key] = episode_db_id
+        logger.info(
+            "Upserted episode summary submission=%s task=%s episode=%s validator=%s id=%s",
+            message.submission_id,
+            message.task_id,
+            message.episode_id,
+            validator_hotkey,
+            episode_db_id,
+        )
         return episode_db_id
+
+    async def _get_episode_id_from_db(
+        self, session: AsyncSession, key: EpisodeKey
+    ) -> Optional[int]:
+        submission_id, episode_id_value, task_id, validator_hotkey = key
+        result = await session.execute(
+            select(EpisodeData.id).where(
+                EpisodeData.submission_id == submission_id,
+                EpisodeData.episode_id == episode_id_value,
+                EpisodeData.task_id == task_id,
+                EpisodeData.validator_hotkey == validator_hotkey,
+            )
+        )
+        episode_id = result.scalar_one_or_none()
+        if episode_id is not None:
+            logger.debug(
+                "Loaded existing episode summary id=%s for submission=%s task=%s episode=%s validator=%s",
+                episode_id,
+                submission_id,
+                task_id,
+                episode_id_value,
+                validator_hotkey,
+            )
+        return episode_id
 
     async def _apply_heartbeats(
         self, session: AsyncSession, heartbeats: Dict[SS58Address, datetime]
