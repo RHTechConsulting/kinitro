@@ -1012,6 +1012,8 @@ class BackendService:
         )
 
         step_table = EpisodeStepData.__table__
+        placeholder_warned: set[EpisodeKey] = set()
+        placeholder_keys: set[EpisodeKey] = set()
 
         max_retries = 5
         attempt = 0
@@ -1064,6 +1066,15 @@ class BackendService:
                                 episode_lookup,
                                 session,
                             )
+                            if key in placeholder_keys:
+                                logger.info(
+                                    "Overwriting placeholder episode with summary submission=%s task=%s episode=%s validator=%s",
+                                    message.submission_id,
+                                    message.task_id,
+                                    message.episode_id,
+                                    validator_hotkey,
+                                )
+                                placeholder_keys.discard(key)
 
                             pending_events.append(
                                 (
@@ -1108,6 +1119,18 @@ class BackendService:
                                     )
                                     status_update_keys.add(status_key)
 
+                        if not episode_payload and step_payloads:
+                            if key not in placeholder_warned:
+                                submission_id, episode_no, task_id, validator_key = key
+                                logger.warning(
+                                    "Episode summary missing for submission=%s task=%s episode=%s validator=%s; using placeholder values",
+                                    submission_id,
+                                    task_id,
+                                    episode_no,
+                                    validator_key,
+                                )
+                                placeholder_warned.add(key)
+
                         if current_episode_id is None and step_payloads:
                             placeholder_episode = self._placeholder_episode_from_step(
                                 step_payloads[0]["message"]
@@ -1119,6 +1142,7 @@ class BackendService:
                                 placeholder_episode.episode_id,
                                 step_payloads[0]["validator_hotkey"],
                             )
+                            placeholder_keys.add(key)
                             current_episode_id = await self._ensure_episode_record(
                                 placeholder_episode,
                                 step_payloads[0]["validator_hotkey"],
@@ -1150,6 +1174,7 @@ class BackendService:
                                     placeholder_episode.episode_id,
                                     validator_hotkey,
                                 )
+                                placeholder_keys.add(key)
                                 episode_lookup_id = await self._ensure_episode_record(
                                     placeholder_episode,
                                     validator_hotkey,
