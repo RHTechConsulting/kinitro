@@ -6,6 +6,9 @@ from core.storage import load_s3_config
 
 dotenv.load_dotenv()
 
+DEFAULT_RPC_HANDSHAKE_MAX_ATTEMPTS = 5
+DEFAULT_RPC_HANDSHAKE_RETRY_SECONDS = 2.0
+
 
 class EvaluatorConfig(Config):
     def __init__(self):
@@ -40,6 +43,31 @@ class EvaluatorConfig(Config):
 
         # Rollout worker actor resource tuning
         self.worker_remote_options = self._build_worker_remote_options()
+
+        # RPC handshake/backoff behavior
+        handshake_attempts_value = self.settings.get("rpc_handshake_max_attempts")
+        try:
+            self.rpc_handshake_max_attempts = max(
+                1,
+                int(
+                    handshake_attempts_value
+                    if handshake_attempts_value is not None
+                    else DEFAULT_RPC_HANDSHAKE_MAX_ATTEMPTS
+                ),
+            )
+        except (TypeError, ValueError):
+            self.rpc_handshake_max_attempts = DEFAULT_RPC_HANDSHAKE_MAX_ATTEMPTS
+
+        handshake_retry_value = self.settings.get("rpc_handshake_retry_seconds")
+        try:
+            retry_seconds = float(
+                handshake_retry_value
+                if handshake_retry_value is not None
+                else DEFAULT_RPC_HANDSHAKE_RETRY_SECONDS
+            )
+        except (TypeError, ValueError):
+            retry_seconds = DEFAULT_RPC_HANDSHAKE_RETRY_SECONDS
+        self.rpc_handshake_retry_seconds = max(0.0, retry_seconds)
 
     def add_args(self):
         """Add command line arguments"""

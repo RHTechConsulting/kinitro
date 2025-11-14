@@ -271,86 +271,118 @@ class Orchestrator:
         )
 
         containers = Containers()
-        pod = containers.create_container(
-            eval_job_msg.submission_id,
-            eval_job_msg.job_id,
-            archive_url=eval_job_msg.artifact_url,
-            archive_sha256=eval_job_msg.artifact_sha256,
-        )
-        logger.info(f"Created pod: {pod}")
+        cluster: Optional[RolloutCluster] = None
+        worker: Optional[ray.actor.ActorHandle] = None
+        worker_to_rpc_queue: Optional[Queue] = None
+        rpc_to_worker_queue: Optional[Queue] = None
+        container_ready = False
 
-        # Get NodePort and Node IP for direct TCP connection
-        config.load_kube_config()
-        k8v1api = client.CoreV1Api()
-        v1 = client.CoreV1Api()
-        service_name = pod
-        svc = k8v1api.read_namespaced_service(service_name, "default")
-        node_port = None
-        for port in svc.spec.ports:
-            if port.node_port:
-                node_port = port.node_port
-                break
-        if not node_port:
-            raise RuntimeError(f"No nodePort found for service {service_name}")
+        try:
+            pod = containers.create_container(
+                eval_job_msg.submission_id,
+                eval_job_msg.job_id,
+                archive_url=eval_job_msg.artifact_url,
+                archive_sha256=eval_job_msg.artifact_sha256,
+            )
+            container_ready = True
+            logger.info(f"Created pod: {pod}")
 
-        # Get the first node's external IP (or internal if not available)
-        nodes = v1.list_node().items
-        node_ip = None
-        for node in nodes:
-            for addr in node.status.addresses:
-                if addr.type == "ExternalIP":
-                    node_ip = addr.address
+            # Get NodePort and Node IP for direct TCP connection
+            config.load_kube_config()
+            k8v1api = client.CoreV1Api()
+            v1 = client.CoreV1Api()
+            service_name = pod
+            svc = k8v1api.read_namespaced_service(service_name, "default")
+            node_port = None
+            for port in svc.spec.ports:
+                if port.node_port:
+                    node_port = port.node_port
                     break
-            if not node_ip:
+            if not node_port:
+                raise RuntimeError(f"No nodePort found for service {service_name}")
+
+            # Get the first node's external IP (or internal if not available)
+            nodes = v1.list_node().items
+            node_ip = None
+            for node in nodes:
                 for addr in node.status.addresses:
-                    if addr.type == "InternalIP":
+                    if addr.type == "ExternalIP":
                         node_ip = addr.address
                         break
-            if node_ip:
-                break
-        if not node_ip:
-            raise RuntimeError("No node IP found in cluster")
+                if not node_ip:
+                    for addr in node.status.addresses:
+                        if addr.type == "InternalIP":
+                            node_ip = addr.address
+                            break
+                if node_ip:
+                    break
+            if not node_ip:
+                raise RuntimeError("No node IP found in cluster")
 
-        # Wait for container to be ready
-        await asyncio.sleep(WAIT_TIME)
+            # Wait for container to be ready
+            await asyncio.sleep(WAIT_TIME)
 
-        # Create a benchmark spec for the job, honoring backend-provided settings
-        benchmark_spec = self._build_benchmark_spec_from_job(eval_job_msg)
+            # Create a benchmark spec for the job, honoring backend-provided settings
+            benchmark_spec = self._build_benchmark_spec_from_job(eval_job_msg)
 
-        worker_to_rpc_queue = Queue(maxsize=QUEUE_MAXSIZE)
-        rpc_to_worker_queue = Queue(maxsize=QUEUE_MAXSIZE)
+            worker_to_rpc_queue = Queue(maxsize=QUEUE_MAXSIZE)
+            rpc_to_worker_queue = Queue(maxsize=QUEUE_MAXSIZE)
 
-        logger.info(
-            f"Creating rollout cluster with config: {self.config.worker_remote_options}"
-        )
-        cluster = RolloutCluster(
-            "eval-cluster",
-            worker_remote_options=self.config.worker_remote_options,
-        )
-        worker = cluster.create_worker(
-            eval_job_msg.job_id,
-            [benchmark_spec],
-            node_ip,
-            node_port,
-            eval_job_msg.submission_id,
-            s3_config=self.config.s3_config,
-            episode_log_interval=self.config.episode_log_interval,
-            step_log_interval=self.config.step_log_interval,
-            database_url=self.config.pg_database,
-        )
+            logger.info(
+                f"Creating rollout cluster with config: {self.config.worker_remote_options}"
+            )
+            cluster = RolloutCluster(
+                "eval-cluster",
+                worker_remote_options=self.config.worker_remote_options,
+            )
+            worker = cluster.create_worker(
+                eval_job_msg.job_id,
+                [benchmark_spec],
+                node_ip,
+                node_port,
+                eval_job_msg.submission_id,
+                s3_config=self.config.s3_config,
+                episode_log_interval=self.config.episode_log_interval,
+                step_log_interval=self.config.step_log_interval,
+                database_url=self.config.pg_database,
+            )
 
-        rpc_thread = threading.Thread(
-            target=RPCProcess,
-            args=(node_ip, node_port, rpc_to_worker_queue, worker_to_rpc_queue),
-            daemon=True,
-        )
-        rpc_thread.start()
+            rpc_thread = threading.Thread(
+                target=RPCProcess,
+                args=(node_ip, node_port, rpc_to_worker_queue, worker_to_rpc_queue),
+                daemon=True,
+            )
+            rpc_thread.start()
 
-        await asyncio.sleep(PROCESS_JOB_WAIT_TIME)
+            await asyncio.sleep(PROCESS_JOB_WAIT_TIME)
 
-        # Test RPC connection
-        res = await worker.test_rpc.remote(worker_to_rpc_queue, rpc_to_worker_queue)
-        logger.info(f"RPC test result for job {eval_job_msg.job_id}: {res}")
+            await self._wait_for_rpc_handshake(
+                job_id=eval_job_msg.job_id,
+                worker=worker,
+                worker_to_rpc_queue=worker_to_rpc_queue,
+                rpc_to_worker_queue=rpc_to_worker_queue,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to prepare evaluation runtime for job %s",
+                eval_job_msg.job_id,
+            )
+            self._teardown_failed_job_setup(
+                job_id=eval_job_msg.job_id,
+                submission_id=eval_job_msg.submission_id,
+                cluster=cluster,
+                worker=worker,
+                worker_to_rpc_queue=worker_to_rpc_queue,
+                rpc_to_worker_queue=rpc_to_worker_queue,
+                containers=containers,
+                container_ready=container_ready,
+            )
+            raise
+
+        assert worker is not None
+        assert cluster is not None
+        assert worker_to_rpc_queue is not None
+        assert rpc_to_worker_queue is not None
 
         # Update status to RUNNING
         try:
@@ -396,6 +428,113 @@ class Orchestrator:
         )
 
         return job_context
+
+    async def _wait_for_rpc_handshake(
+        self,
+        *,
+        job_id: Any,
+        worker,
+        worker_to_rpc_queue: Queue,
+        rpc_to_worker_queue: Queue,
+    ) -> None:
+        """Ensure the RPC client can reach the submission container before proceeding."""
+        max_attempts = max(1, getattr(self.config, "rpc_handshake_max_attempts", 5))
+        retry_seconds = max(
+            0.0, getattr(self.config, "rpc_handshake_retry_seconds", 2.0)
+        )
+
+        last_error = "no response received from RPC process"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await worker.test_rpc.remote(
+                    worker_to_rpc_queue, rpc_to_worker_queue
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "RPC handshake attempt %d/%d for job %s failed: %s",
+                    attempt,
+                    max_attempts,
+                    job_id,
+                    exc,
+                )
+            else:
+                if response and getattr(response, "success", False):
+                    logger.info(
+                        "RPC handshake succeeded for job %s on attempt %d",
+                        job_id,
+                        attempt,
+                    )
+                    return
+
+                response_error = getattr(response, "error_message", None)
+                last_error = response_error or "RPC response reported failure"
+                logger.warning(
+                    "RPC handshake attempt %d/%d for job %s reported error: %s",
+                    attempt,
+                    max_attempts,
+                    job_id,
+                    last_error,
+                )
+
+            if attempt < max_attempts and retry_seconds > 0:
+                delay = retry_seconds * attempt
+                logger.info("Retrying RPC handshake for job %s in %.1fs", job_id, delay)
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(
+            f"Unable to establish RPC connection for job {job_id} after {max_attempts} attempts: {last_error}"
+        )
+
+    def _teardown_failed_job_setup(
+        self,
+        *,
+        job_id: Any,
+        submission_id: Optional[Any],
+        cluster: Optional[RolloutCluster],
+        worker: Optional[Any],
+        worker_to_rpc_queue: Optional[Queue],
+        rpc_to_worker_queue: Optional[Queue],
+        containers: Containers,
+        container_ready: bool,
+    ) -> None:
+        """Best-effort cleanup for failures that occur before a job starts running."""
+        if worker_to_rpc_queue is not None or rpc_to_worker_queue is not None:
+            temp_context = {
+                "job_id": job_id,
+                "worker_to_rpc_queue": worker_to_rpc_queue,
+                "rpc_to_worker_queue": rpc_to_worker_queue,
+            }
+            try:
+                self._cleanup_queues(temp_context)
+            except Exception as exc:
+                logger.warning(
+                    "Queue cleanup failed during setup teardown for job %s: %s",
+                    job_id,
+                    exc,
+                )
+
+        if cluster and worker:
+            try:
+                cluster.delete_worker(worker)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete rollout worker during setup teardown for job %s: %s",
+                    job_id,
+                    exc,
+                )
+
+        if submission_id is not None and container_ready:
+            try:
+                containers.cleanup_container(submission_id, job_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cleanup container for job %s during setup teardown: %s",
+                    job_id,
+                    exc,
+                )
+
+        gc.collect()
 
     def _build_log_payload(
         self,
