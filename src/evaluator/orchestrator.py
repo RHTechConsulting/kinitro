@@ -18,7 +18,7 @@ from ray.util.queue import Queue
 from snowflake import SnowflakeGenerator
 
 from core.db.models import EvaluationStatus
-from core.log import get_logger
+from core.log import configure_logging, get_logger
 from core.messages import EvalJobMessage, EvalResultMessage, JobStatusUpdateMessage
 from evaluator.config import EvaluatorConfig
 from evaluator.containers import Containers, PodSchedulingError
@@ -1296,5 +1296,7 @@ class Orchestrator:
 
 
 if __name__ == "__main__":
-    orc = Orchestrator(EvaluatorConfig())
+    evaluator_config = EvaluatorConfig()
+    configure_logging(evaluator_config.log_file)
+    orc = Orchestrator(evaluator_config)
     asyncio.run(orc.start())

@@ -4,9 +4,12 @@ Custom logging implementation.
 
 import logging
 import os
+import re
 import sys
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
 from colorama import Back, Fore, Style, init
 
@@ -99,6 +102,93 @@ class ColoredFormatter(logging.Formatter):
         return formatted_message
 
 
+_DEFAULT_COLORED_FORMAT = (
+    f"{Fore.BLUE}%(asctime)s.%(msecs)03d{Style.RESET_ALL} | "
+    f"%(levelname)s | "
+    f"{Fore.BLUE}%(name)s{Style.RESET_ALL}:"
+    f"{Fore.BLUE}%(funcName)s{Style.RESET_ALL}:"
+    f"{Fore.BLUE}%(lineno)d{Style.RESET_ALL} - "
+    f"%(message)s"
+)
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@dataclass
+class _LoggerSettings:
+    log_format: str
+    date_format: str
+
+
+_LOGGING_STATE: dict[str, Optional[Path]] = {
+    "log_file_path": Path(os.getenv("LOG_FILE")).expanduser()
+    if os.getenv("LOG_FILE")
+    else None
+}
+_MANAGED_LOGGERS: dict[logging.Logger, _LoggerSettings] = {}
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", value)
+
+
+def _build_handlers(
+    level: int, log_format: str, date_format: str
+) -> list[logging.Handler]:
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(ColoredFormatter(log_format, datefmt=date_format))
+    handlers: list[logging.Handler] = [stream_handler]
+
+    log_path = _LOGGING_STATE["log_file_path"]
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="a")
+        file_handler.setLevel(level)
+        plain_format = logging.Formatter(_strip_ansi(log_format), datefmt=date_format)
+        file_handler.setFormatter(plain_format)
+        handlers.append(file_handler)
+
+    return handlers
+
+
+def _clear_handlers(logger: logging.Logger):
+    for handler in logger.handlers:
+        try:
+            handler.close()
+        except Exception:
+            pass
+    logger.handlers.clear()
+
+
+def _apply_handlers(logger: logging.Logger, log_format: str, date_format: str) -> None:
+    level = logger.level or logging.INFO
+    _clear_handlers(logger)
+    for handler in _build_handlers(level, log_format, date_format):
+        logger.addHandler(handler)
+
+
+def configure_logging(log_file_path: Optional[Union[str, os.PathLike[str]]] = None):
+    """Configure global logging behavior.
+
+    Parameters
+    ----------
+    log_file_path: Optional[Union[str, os.PathLike[str]]]
+        When provided, logs are additionally written to this file.
+        Passing None disables file logging.
+    """
+
+    if log_file_path:
+        path = Path(log_file_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _LOGGING_STATE["log_file_path"] = path
+    else:
+        _LOGGING_STATE["log_file_path"] = None
+
+    for logger, settings in _MANAGED_LOGGERS.items():
+        _apply_handlers(logger, settings.log_format, settings.date_format)
+
+
 def get_logger(
     name: str,
     log_format: Optional[str] = None,
@@ -154,31 +244,28 @@ def get_logger(
 
     # Define default log format if not provided
     if not log_format:
-        log_format = (
-            f"{Fore.BLUE}%(asctime)s.%(msecs)03d{Style.RESET_ALL} | "
-            f"%(levelname)s | "
-            f"{Fore.BLUE}%(name)s{Style.RESET_ALL}:"
-            f"{Fore.BLUE}%(funcName)s{Style.RESET_ALL}:"
-            f"{Fore.BLUE}%(lineno)d{Style.RESET_ALL} - "
-            f"%(message)s"
-        )
+        log_format = _DEFAULT_COLORED_FORMAT
 
     # Define default date format if not provided
     if not date_format:
         date_format = "%Y-%m-%d %H:%M:%S"
 
-    # Initialize the formatter
-    formatter = ColoredFormatter(log_format, datefmt=date_format)
+    managed = handlers is None
 
-    # If no handlers are provided, use StreamHandler
+    # If no handlers are provided, use default stream (and optional file) handlers
     if not handlers:
-        handlers = [logging.StreamHandler(sys.stdout)]
+        handlers = _build_handlers(log_level.level, log_format, date_format)
+    else:
+        _MANAGED_LOGGERS.pop(logger, None)
 
-    # Attach handlers with the formatter
+    _clear_handlers(logger)
     for handler in handlers:
-        handler.setLevel(log_level.level)
-        handler.setFormatter(formatter)
         logger.addHandler(handler)
+
+    if managed:
+        _MANAGED_LOGGERS[logger] = _LoggerSettings(
+            log_format=log_format, date_format=date_format
+        )
 
     logger.debug(f"Logger '{name}' initialized with level {log_level}")
     return logger

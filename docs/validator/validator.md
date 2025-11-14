@@ -64,10 +64,11 @@ You will also need `evaluator.toml` for the orchestrator that executes jobs:
 cp config/evaluator.toml.example evaluator.toml
 ```
 
-Edit `evaluator.toml` to set your desired parameters, such as the PostgreSQL database connection string, R2 credentials, and logging intervals.
+Edit `evaluator.toml` to set your desired parameters, such as the PostgreSQL database connection string, R2 credentials, logging intervals, and the `log_file` path (defaults to `logs/evaluator.log`) where the orchestrator persists its stdout/stderr stream. The backend FastAPI service reads the same `log_file` key from `backend.toml`, so backend requests and background worker logs land in `logs/backend.log` by default.
 
 Key resource knobs in `evaluator.toml`:
 
+- `log_file` – path on disk where evaluator logs are mirrored in addition to stdout.
 - `ray_num_cpus`, `ray_num_gpus`, `ray_memory_gb`, `ray_object_store_memory_gb` – tune the Ray head resources the orchestrator reserves when it boots.
 - `worker_num_cpus`, `worker_num_gpus`, `worker_memory_gb`, `worker_max_restarts`, `worker_max_task_retries` – control how much CPU/GPU/memory each rollout worker actor requests from Ray.
 

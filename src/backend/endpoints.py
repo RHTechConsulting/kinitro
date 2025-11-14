@@ -58,7 +58,7 @@ from backend.service import (
 )
 from core import __version__ as VERSION  # noqa: N812
 from core.db.models import EvaluationStatus, SnowflakeId
-from core.log import get_logger
+from core.log import configure_logging, get_logger
 from core.messages import (
     EpisodeDataMessage,
     EpisodeStepDataMessage,
@@ -106,8 +106,6 @@ from .models import (
     ValidatorConnection,
     ValidatorInfoResponse,
 )
-
-logger = get_logger(__name__)
 
 
 class SubmissionUploadRequest(BaseModel):
@@ -187,6 +185,10 @@ def _build_submission_upload_message(payload: SubmissionUploadRequest) -> bytes:
 
 # Create backend service instance
 config = BackendConfig()
+if config.log_file:
+    configure_logging(config.log_file)
+
+logger = get_logger(__name__)
 backend_service = BackendService(config)
 API_SECURITY_SCHEME_NAME = "ApiKeyAuth"
 

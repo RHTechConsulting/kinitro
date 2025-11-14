@@ -16,6 +16,7 @@ class EvaluatorConfig(Config):
         )
         super().__init__(opts)
         self.pg_database = self.settings.get("pg_database")  # type: ignore
+        self.log_file = self._normalize_log_file(self.settings.get("log_file"))
 
         # S3 storage configuration
         self.s3_config = load_s3_config()
@@ -51,6 +52,13 @@ class EvaluatorConfig(Config):
             default=self.settings.get(
                 "pg_database", "postgresql://user:password@localhost/dbname"
             ),  # type: ignore
+        )
+
+        self._parser.add_argument(
+            "--log-file",
+            type=str,
+            help="File path to write evaluator logs (and keep stdout logging). Leave empty to disable.",
+            default=self.settings.get("log_file", "logs/evaluator.log"),
         )
 
     def _build_worker_remote_options(self) -> dict:
@@ -89,3 +97,10 @@ class EvaluatorConfig(Config):
             return int(numeric * (1024**3))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _normalize_log_file(value) -> str | None:
+        if value is None:
+            return None
+        string_value = str(value).strip()
+        return string_value or None
