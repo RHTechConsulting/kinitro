@@ -10,6 +10,7 @@ class BackendConfig(Config):
             settings_files=["backend.toml"],
         )
         super().__init__(opts)
+        self.log_file = self._normalize_log_file(self.settings.get("log_file"))
 
     def add_args(self):
         """Add command line arguments"""
@@ -63,3 +64,17 @@ class BackendConfig(Config):
             help="Number of validator message worker tasks (0 uses CPU-based default)",
             default=self.settings.get("validator_message_workers"),
         )
+
+        self._parser.add_argument(
+            "--log-file",
+            type=str,
+            help="File path to write backend logs (in addition to stdout). Leave empty to disable.",
+            default=self.settings.get("log_file", "logs/backend.log"),
+        )
+
+    @staticmethod
+    def _normalize_log_file(value) -> str | None:
+        if value is None:
+            return None
+        string_value = str(value).strip()
+        return string_value or None

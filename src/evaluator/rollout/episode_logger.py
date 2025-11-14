@@ -258,7 +258,22 @@ class EpisodeLogger:
 
         # Queue episode to database if configured
         if self.config.database_url:
-            await self._queue_episode_data(episode_data)
+            logger.info(
+                "Queuing episode summary submission=%s task=%s episode=%s job=%s",
+                self.submission_id,
+                self.task_id,
+                self._current_episode_id,
+                self.job_id,
+            )
+            enqueued = await self._queue_episode_data(episode_data)
+            if not enqueued:
+                logger.error(
+                    "Failed to queue episode summary submission=%s task=%s episode=%s job=%s",
+                    self.submission_id,
+                    self.task_id,
+                    self._current_episode_id,
+                    self.job_id,
+                )
 
             # Queue all step data after episode is queued to avoid race condition
             for step_data in self._current_episode_steps:
@@ -565,7 +580,7 @@ class EpisodeLogger:
 
         return False
 
-    async def _queue_episode_data(self, episode_data: Dict[str, Any]) -> None:
+    async def _queue_episode_data(self, episode_data: Dict[str, Any]) -> bool:
         """Queue episode data to be sent to backend via pgqueuer.
 
         Args:
@@ -592,14 +607,24 @@ class EpisodeLogger:
             success = await self._queue_with_retry("episode_data", message_json)
 
             if success:
-                logger.debug(f"Queued episode {episode_data['episode_id']} for backend")
-            else:
-                logger.error(
-                    f"Failed to queue episode {episode_data['episode_id']} after all retries"
+                logger.info(
+                    "Queued episode summary submission=%s task=%s episode=%s job=%s",
+                    episode_data["submission_id"],
+                    episode_data["task_id"],
+                    episode_data["episode_id"],
+                    episode_data["job_id"],
                 )
+                return True
+
+            logger.error(
+                "Failed to queue episode %s after all retries",
+                episode_data["episode_id"],
+            )
+            return False
 
         except Exception as e:
             logger.error(f"Failed to prepare episode data for queuing: {e}")
+            return False
 
     async def _queue_step_data(self, step_data: Dict[str, Any]) -> None:
         """Queue step data to be sent to backend via pgqueuer.
